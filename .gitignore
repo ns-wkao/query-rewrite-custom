@@ -1,0 +1,15 @@
+# Java
+*.class
+
+# Maven
+target/
+.classpath
+.project
+.settings/
+.factorypath
+
+# VSCode
+.vscode/
+
+# Logs
+*.log

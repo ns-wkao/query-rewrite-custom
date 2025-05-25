@@ -1,0 +1,63 @@
+tables:
+  '"redshift_poc_iceberg"."alert_v3"':
+    schema:
+      - action: VARCHAR
+      - policy: VARCHAR
+      - transaction_id: INTEGER
+      - organization_unit: VARCHAR
+      - app: VARCHAR
+      - instance_id: VARCHAR
+      - timestamp: TIMESTAMP
+      - url: VARCHAR
+      - count: INTEGER
+      - ur_normalized: VARCHAR
+      - alert_type: VARCHAR
+      - ns_tenant_id: INTEGER
+      - ns_creation_timestamp: TIMESTAMP
+      - signature_id: INTEGER
+
+materializedViews:
+  MV_ALERT_TENANT_TYPE_SUM:
+    definition: >
+      SELECT
+          "timestamp",
+          ns_tenant_id,
+          alert_type,
+          SUM("count") AS total_type_alerts
+      FROM
+          "redshift_poc_iceberg"."alert_v3"
+      GROUP BY
+          "timestamp",
+          ns_tenant_id,
+          alert_type
+    targetTable: redshift_poc_iceberg.alert_v3_tenant_type_sum
+  MV_ALERT_V3_ALIAS_DERIVED:
+    definition: >
+      SELECT
+        *,
+        action,
+        policy,
+        transaction_id,
+        SPLIT(organization_unit, '/'),
+        CONCAT(app, instance_id)
+      FROM
+        "redshift_poc_iceberg"."alert_v3"
+    targetTable: redshift_poc_iceberg.mv_alert_v3_alias_derived
+  MV_ALERT_EVENT_DAILY_AGG:
+    definition: >
+      SELECT
+        date_trunc('day', timestamp)  AS timestamp,
+        ns_tenant_id,
+        alert_type,
+        SPLIT(organization_unit, '/'),
+        CONCAT(app, instance_id),
+        SUM("count")   AS count
+      FROM
+        "redshift_poc_iceberg"."alert_v3"
+      GROUP BY
+        date_trunc('day', timestamp),
+        ns_tenant_id,
+        alert_type,
+        SPLIT(organization_unit, '/'),
+        CONCAT(app, instance_id)
+    targetTable: redshift_poc_iceberg.alert_event_daily_sum
