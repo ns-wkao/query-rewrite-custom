@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -57,14 +58,17 @@ public class QueryMetadataExtractor {
             metadata.setProjectionColumns(extractProjections(querySpec, relationInfo.alias));
             metadata.setGroupByColumns(extractGroupBy(querySpec, relationInfo.alias));
             metadata.setAggregations(extractAggregations(querySpec, relationInfo.alias));
+            metadata.setFilterColumns(extractFilterColumns(querySpec, relationInfo.alias));
+
         }
 
-        logger.debug("Extracted metadata: baseTable={}, alias={}, projections={}, groupBy={}, aggregations={}",
+        logger.info("Extracted metadata: baseTable={}, alias={}, projections={}, groupBy={}, aggregations={}, filters={}", // Added filters
                 metadata.getBaseTable(),
                 metadata.getTableAlias().orElse("N/A"),
                 metadata.getProjectionColumns(),
                 metadata.getGroupByColumns(),
-                metadata.getAggregations().keySet());
+                metadata.getAggregations(), // Now a list
+                metadata.getFilterColumns()); // Added filters
         return metadata;
     }
 
@@ -211,6 +215,53 @@ public class QueryMetadataExtractor {
         }
     }
 
+    /**
+     * Visitor to collect Identifiers and DereferenceExpressions, suitable for
+     * identifying potential columns used in WHERE clauses.
+     */
+    private static class ColumnIdentifierCollectorVisitor extends AstVisitor<Void, List<Expression>> {
+
+        @Override
+        protected Void visitIdentifier(Identifier node, List<Expression> context) {
+            // Add identifiers found.
+            context.add(node);
+            return null;
+        }
+
+        @Override
+        protected Void visitDereferenceExpression(DereferenceExpression node, List<Expression> context) {
+            // Add the whole a.b expression for later normalization.
+            context.add(node);
+            // Don't recurse; we want the whole expression.
+            return null;
+        }
+
+        @Override
+        protected Void visitFunctionCall(FunctionCall node, List<Expression> context) {
+            // Recurse only on arguments and filter, not the function name itself.
+            node.getArguments().forEach(arg -> process(arg, context));
+            node.getFilter().ifPresent(f -> process(f, context));
+            // Do not process the function call node itself unless desired.
+            return null;
+        }
+
+        @Override
+        protected Void visitNode(Node node, List<Expression> context) {
+            // Default action: recurse through children ONLY if it's not
+            // one of the types we capture directly or handle specially.
+            if (!(node instanceof Identifier) &&
+                !(node instanceof DereferenceExpression) &&
+                !(node instanceof FunctionCall))
+            {
+                for (Node child : node.getChildren()) {
+                    process(child, context); // Use 'process' to continue visiting
+                }
+            }
+            return null;
+        }
+    }
+    
+
     private static List<String> extractProjections(QuerySpecification querySpec, Optional<String> tableAlias) {
         List<String> projections = new ArrayList<>();
         for (SelectItem item : querySpec.getSelect().getSelectItems()) {
@@ -260,8 +311,8 @@ public class QueryMetadataExtractor {
         return groupByColumns;
     }
 
-    private static Map<String, String> extractAggregations(QuerySpecification querySpec, Optional<String> tableAlias) {
-        Map<String, String> aggregations = new HashMap<>();
+    private static List<String> extractAggregations(QuerySpecification querySpec, Optional<String> tableAlias) {
+        List<String> aggregations = new ArrayList<>(); // Use List instead of Map
         AliasStrippingExpressionVisitor visitor = tableAlias.map(AliasStrippingExpressionVisitor::new).orElse(null);
 
         for (SelectItem item : querySpec.getSelect().getSelectItems()) {
@@ -271,15 +322,16 @@ public class QueryMetadataExtractor {
                     FunctionCall originalFunctionCall = (FunctionCall) expression;
 
                     if (visitor == null) {
-                        aggregations.put(originalFunctionCall.getName().toString(), originalFunctionCall.toString());
+                        // If no alias to strip, just add the original function call string
+                        aggregations.add(originalFunctionCall.toString());
                         continue;
                     }
 
+                    // Normalize arguments if a visitor exists
                     List<Expression> normalizedArgs = originalFunctionCall.getArguments().stream()
                             .map(arg -> (Expression) visitor.process(arg, null))
                             .collect(Collectors.toList());
 
-                    // WORKAROUND: Do not process Window or OrderBy
                     Optional<Window> newWindow = originalFunctionCall.getWindow();
                     Optional<OrderBy> newOrderBy = originalFunctionCall.getOrderBy();
 
@@ -303,10 +355,31 @@ public class QueryMetadataExtractor {
                                 normalizedArgs
                         );
                     }
-                    aggregations.put(originalFunctionCall.getName().toString(), processedFunctionCall.toString());
+                    // Add the (potentially normalized) function call string to the List
+                    aggregations.add(processedFunctionCall.toString());
                 }
             }
         }
-        return aggregations;
+        return aggregations; // Return the List
+    }
+    /**
+     * Extracts columns used in the WHERE clause and normalizes them.
+     */
+    private static List<String> extractFilterColumns(QuerySpecification querySpec, Optional<String> tableAlias) {
+        if (!querySpec.getWhere().isPresent()) {
+            return new ArrayList<>(); // No WHERE clause, no filter columns.
+        }
+
+        Expression whereClause = querySpec.getWhere().get();
+        List<Expression> foundExpressions = new ArrayList<>();
+        new ColumnIdentifierCollectorVisitor().process(whereClause, foundExpressions);
+
+        // Normalize and collect unique column names
+        Set<String> filterColumns = foundExpressions.stream()
+                .map(expr -> normalizeExpression(expr, tableAlias)) // Use existing normalizer
+                .map(Expression::toString)
+                .collect(Collectors.toSet()); // Use Set to get distinct columns
+
+        return new ArrayList<>(filterColumns);
     }
 }

@@ -6,6 +6,7 @@ import com.poc.rewrite.config.MaterializedViewMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 // List, Map, Set, Collectors imports are used by the remaining isMatch method
 import java.util.Set; 
 import java.util.stream.Collectors;
@@ -39,12 +40,13 @@ public class QueryMatcher {
 
         // Check aggregated columns by function name
         // The MV must provide all types of aggregations (e.g., SUM, COUNT) required by the user query.
-        Set<String> userAggFunctionNames = userMetadata.getAggregations().keySet();
-        Set<String> mvAggFunctionNames = mvMetadata.getAggregations().keySet();
+        List<String> userAggs = userMetadata.getAggregations();
+        List<String> mvAggs = mvMetadata.getAggregations();
 
-        if (!mvAggFunctionNames.containsAll(userAggFunctionNames)) {
-            logger.debug("Aggregation function types mismatch. Query requires functions: {}, MV provides functions: {}.",
-                    userAggFunctionNames, mvAggFunctionNames);
+        if (!mvAggs.containsAll(userAggs)) {
+            logger.debug("Aggregation mismatch. Query requires aggregations: {}, MV provides aggregations: {}. User aggs not found in MV: {}",
+                    userAggs, mvAggs,
+                    userAggs.stream().filter(s -> !mvAggs.contains(s)).collect(Collectors.toList()));
             return false;
         }
         

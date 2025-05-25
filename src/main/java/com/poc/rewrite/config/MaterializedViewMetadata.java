@@ -2,14 +2,17 @@ package com.poc.rewrite.config;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional; // Ensure this is imported
+import java.util.Optional;
+import java.util.ArrayList; // Import ArrayList
 
 public class MaterializedViewMetadata {
     private String baseTable;
-    private Optional<String> tableAlias = Optional.empty(); // New field
-    private List<String> projectionColumns;
-    private Map<String, String> aggregations;
-    private List<String> groupByColumns;
+    private Optional<String> tableAlias = Optional.empty();
+    private List<String> projectionColumns = new ArrayList<>();
+    private List<String> aggregations = new ArrayList<>();
+    private List<String> groupByColumns = new ArrayList<>();
+    private List<String> filterColumns = new ArrayList<>();
+
 
     // Getters and setters
     public String getBaseTable() { return baseTable; }
@@ -21,9 +24,12 @@ public class MaterializedViewMetadata {
     public List<String> getProjectionColumns() { return projectionColumns; }
     public void setProjectionColumns(List<String> projectionColumns) { this.projectionColumns = projectionColumns; }
 
-    public Map<String, String> getAggregations() { return aggregations; }
-    public void setAggregations(Map<String, String> aggregations) { this.aggregations = aggregations; }
+    public List<String> getAggregations() { return aggregations; }
+    public void setAggregations(List<String> aggregations) { this.aggregations = aggregations; }
 
     public List<String> getGroupByColumns() { return groupByColumns; }
     public void setGroupByColumns(List<String> groupByColumns) { this.groupByColumns = groupByColumns; }
+
+    public List<String> getFilterColumns() { return filterColumns; }
+    public void setFilterColumns(List<String> filterColumns) { this.filterColumns = filterColumns; }
 }

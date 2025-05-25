@@ -42,7 +42,7 @@ public class SQLRewritePoc {
                     mvMetadataMap.put(mvName, metadata);
                     logger.info("Extracted metadata for MV '{}': baseTable={}, projections={}, aggregations={}, groupBy={}.",
                             mvName, metadata.getBaseTable(), metadata.getProjectionColumns(),
-                            metadata.getAggregations().keySet(), metadata.getGroupByColumns());
+                            metadata.getAggregations(), metadata.getGroupByColumns());
                 } catch (Exception e) {
                     logger.error("Failed to parse or extract metadata for MV '{}': {}", mvName, e.getMessage());
                 }
