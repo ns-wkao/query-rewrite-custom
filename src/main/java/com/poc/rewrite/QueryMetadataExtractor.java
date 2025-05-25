@@ -4,6 +4,8 @@ import com.poc.rewrite.config.MaterializedViewMetadata;
 
 // We need these for FunctionCall, even if not directly processing them now
 import io.trino.sql.tree.*;
+import io.trino.sql.parser.ParsingException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -140,10 +142,13 @@ public class QueryMetadataExtractor {
         if (!tableAlias.isPresent() || expression == null) {
             return expression;
         }
-        return (Expression) new AliasStrippingExpressionVisitor(tableAlias.get()).process(expression, null);
+        // Use the new ExpressionRewriter based visitor
+        return ExpressionTreeRewriter.rewriteWith(
+                new AliasStrippingExpressionVisitor(tableAlias.get()),
+                expression);
     }
 
-    private static class AliasStrippingExpressionVisitor extends AstVisitor<Node, Void> {
+    private static class AliasStrippingExpressionVisitor extends ExpressionRewriter<Void> {
         private final String aliasToStrip;
 
         public AliasStrippingExpressionVisitor(String aliasToStrip) {
@@ -151,114 +156,66 @@ public class QueryMetadataExtractor {
         }
 
         @Override
-        protected Node visitDereferenceExpression(DereferenceExpression node, Void context) {
+        public Expression rewriteDereferenceExpression(DereferenceExpression node, Void context, ExpressionTreeRewriter<Void> treeRewriter) {
+            // Check if the base is an Identifier and matches our alias
             if (node.getBase() instanceof Identifier) {
                 Identifier baseIdentifier = (Identifier) node.getBase();
                 if (node.getField().isPresent() && baseIdentifier.getValue().toLowerCase().equals(this.aliasToStrip)) {
+                    // If it matches, just return the field (which is an Identifier)
+                    // We don't need to rewrite it further.
                     return node.getField().get();
                 }
             }
-            Expression newBase = (Expression) process(node.getBase(), context);
-            if (newBase != node.getBase()) {
-                if (node.getField().isPresent()) {
-                    Identifier field = node.getField().get();
-                    if (node.getLocation().isPresent()) {
-                        return new DereferenceExpression(node.getLocation().get(), newBase, field);
-                    } else {
-                        return new DereferenceExpression(newBase, field);
-                    }
-                }
-            }
-            return node;
+            // IMPORTANT: If it doesn't match, or base isn't Identifier,
+            // we must still process its children (especially the base)
+            // using the treeRewriter to handle nested cases.
+            return treeRewriter.defaultRewrite(node, context);
         }
 
-        @Override
-        protected Node visitFunctionCall(FunctionCall node, Void context) {
-            boolean changed = false;
-            List<Expression> newArguments = new ArrayList<>();
-            for (Expression arg : node.getArguments()) {
-                Expression processedArg = (Expression) process(arg, context);
-                if (processedArg != arg) {
-                    changed = true;
-                }
-                newArguments.add(processedArg);
-            }
-
-            Optional<Window> newWindow = node.getWindow();
-            Optional<OrderBy> newOrderBy = node.getOrderBy();
-            Optional<Expression> newFilter = node.getFilter().map(f -> (Expression) process(f, context));
-            if (!Objects.equals(newFilter, node.getFilter())) changed = true;
-
-            if (changed) {
-                return new FunctionCall(
-                        node.getLocation(),
-                        node.getName(),
-                        newWindow,
-                        newFilter,
-                        newOrderBy,
-                        node.isDistinct(),
-                        node.getNullTreatment(),
-                        node.getProcessingMode(), // Added
-                        newArguments);
-            }
-            return node;
-        }
-
-        @Override
-        protected Node visitIdentifier(Identifier node, Void context) {
-            return node;
-        }
-
-        @Override
-        protected Node visitNode(Node node, Void context) {
-           return node;
-        }
+        // We can override other expression types if needed, but ExpressionRewriter
+        // handles traversal fairly well.
     }
 
     /**
-     * Visitor to collect Identifiers and DereferenceExpressions, suitable for
-     * identifying potential columns used in WHERE clauses.
+     * Visitor to collect Identifiers and DereferenceExpressions using DefaultTraversalVisitor
+     * to ensure we visit all nodes in the WHERE clause.
      */
-    private static class ColumnIdentifierCollectorVisitor extends AstVisitor<Void, List<Expression>> {
+    private static class ColumnIdentifierCollectorVisitor extends DefaultTraversalVisitor<List<Expression>> {
 
         @Override
         protected Void visitIdentifier(Identifier node, List<Expression> context) {
-            // Add identifiers found.
+            // Add the identifier found.
+            // We might add function names too, but normalization might help later.
+            // For now, let's add it.
+            logger.trace("Filter Visitor: Found Identifier: {}", node.getValue());
             context.add(node);
-            return null;
+            return null; // DefaultTraversalVisitor handles children, but Identifier has none.
         }
 
         @Override
         protected Void visitDereferenceExpression(DereferenceExpression node, List<Expression> context) {
-            // Add the whole a.b expression for later normalization.
+            // We want the *whole* expression (e.g., alias.column)
+            // We don't want to recurse and get 'alias' and 'column' separately.
+            logger.trace("Filter Visitor: Found DereferenceExpression: {}", node);
             context.add(node);
-            // Don't recurse; we want the whole expression.
-            return null;
+            return null; // IMPORTANT: Stop traversal here, don't visit children.
         }
 
         @Override
         protected Void visitFunctionCall(FunctionCall node, List<Expression> context) {
-            // Recurse only on arguments and filter, not the function name itself.
-            node.getArguments().forEach(arg -> process(arg, context));
+            // We ONLY want to visit the *arguments* of a function, not its name.
+            logger.trace("Filter Visitor: Visiting FunctionCall args: {}", node.getName());
+            for(Expression arg : node.getArguments()) {
+                process(arg, context);
+            }
             node.getFilter().ifPresent(f -> process(f, context));
-            // Do not process the function call node itself unless desired.
-            return null;
+            return null; // Stop traversal here (don't process the function name itself).
         }
 
-        @Override
-        protected Void visitNode(Node node, List<Expression> context) {
-            // Default action: recurse through children ONLY if it's not
-            // one of the types we capture directly or handle specially.
-            if (!(node instanceof Identifier) &&
-                !(node instanceof DereferenceExpression) &&
-                !(node instanceof FunctionCall))
-            {
-                for (Node child : node.getChildren()) {
-                    process(child, context); // Use 'process' to continue visiting
-                }
-            }
-            return null;
-        }
+        // We don't override other methods, so DefaultTraversalVisitor will
+        // automatically continue visiting children for nodes like
+        // ComparisonExpression, LogicalBinaryExpression, etc., eventually
+        // leading us to Identifiers or DereferenceExpressions.
     }
     
 
@@ -321,22 +278,15 @@ public class QueryMetadataExtractor {
                 if (expression instanceof FunctionCall) {
                     FunctionCall originalFunctionCall = (FunctionCall) expression;
 
-                    if (visitor == null) {
-                        // If no alias to strip, just add the original function call string
-                        aggregations.add(originalFunctionCall.toString());
-                        continue;
-                    }
-
-                    // Normalize arguments if a visitor exists
                     List<Expression> normalizedArgs = originalFunctionCall.getArguments().stream()
-                            .map(arg -> (Expression) visitor.process(arg, null))
-                            .collect(Collectors.toList());
+                        .map(arg -> normalizeExpression(arg, tableAlias)) // Use normalizeExpression!
+                        .collect(Collectors.toList());
+
+                    Optional<Expression> newFilter = originalFunctionCall.getFilter()
+                            .map(f -> normalizeExpression(f, tableAlias)); // Use normalizeExpression!
 
                     Optional<Window> newWindow = originalFunctionCall.getWindow();
                     Optional<OrderBy> newOrderBy = originalFunctionCall.getOrderBy();
-
-                    Optional<Expression> newFilter = originalFunctionCall.getFilter()
-                            .map(f -> (Expression) visitor.process(f, null));
 
                     boolean changed = !Objects.equals(originalFunctionCall.getArguments(), normalizedArgs) ||
                                       !Objects.equals(originalFunctionCall.getFilter(), newFilter);
@@ -374,12 +324,15 @@ public class QueryMetadataExtractor {
         List<Expression> foundExpressions = new ArrayList<>();
         new ColumnIdentifierCollectorVisitor().process(whereClause, foundExpressions);
 
+        logger.debug("Found raw filter expressions: {}", foundExpressions);
+
         // Normalize and collect unique column names
         Set<String> filterColumns = foundExpressions.stream()
                 .map(expr -> normalizeExpression(expr, tableAlias)) // Use existing normalizer
                 .map(Expression::toString)
                 .collect(Collectors.toSet()); // Use Set to get distinct columns
 
+        logger.debug("Extracted normalized filter columns: {}", filterColumns);
         return new ArrayList<>(filterColumns);
     }
 }

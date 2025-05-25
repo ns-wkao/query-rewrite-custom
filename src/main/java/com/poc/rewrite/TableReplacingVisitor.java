@@ -243,10 +243,6 @@ public class TableReplacingVisitor extends AstVisitor<Node, Void> {
     
     @Override
     protected Node visitNode(Node node, Void context) {
-        // This is a fallback. If specific parent types are not handled above,
-        // this might be too generic or might not correctly reconstruct.
-        // However, for replacing a Table within known structures (Query, QuerySpec, Join, Alias, Subquery, With),
-        // the specific overrides should cover it.
         return super.visitNode(node, context);
     }
 }

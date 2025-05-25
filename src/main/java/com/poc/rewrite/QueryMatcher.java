@@ -6,6 +6,7 @@ import com.poc.rewrite.config.MaterializedViewMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashSet;
 import java.util.List;
 // List, Map, Set, Collectors imports are used by the remaining isMatch method
 import java.util.Set; 
@@ -59,6 +60,24 @@ public class QueryMatcher {
             logger.debug("Projection columns mismatch. Query requires projection items: {}, MV provides projection items: {}. User query items not found in MV: {}",
                     userProjectionStrings, mvProjectionStrings,
                     userProjectionStrings.stream().filter(s -> !mvProjectionStrings.contains(s)).collect(Collectors.toSet()));
+            return false;
+        }
+
+        
+
+        // Check if MV provides all columns needed by user's WHERE clause
+        List<String> userFilterCols = userMetadata.getFilterColumns();
+        Set<String> mvAvailableCols = new HashSet<>(mvMetadata.getProjectionColumns());
+        mvAvailableCols.addAll(mvMetadata.getGroupByColumns()); // Group-by cols can also be used
+
+        logger.info("QueryMatcher DEBUG - MV Key (if known, otherwise N/A)"); // You might not have MV key here easily
+        logger.info("QueryMatcher DEBUG - User Filter Cols: {}", userFilterCols);
+        logger.info("QueryMatcher DEBUG - MV Available Cols (for filter check): {}", mvAvailableCols);
+
+        if (!mvAvailableCols.containsAll(userFilterCols)) {
+            logger.debug("Filter columns mismatch. Query WHERE needs: {}, MV provides (Projections + GroupBy): {}. Missing: {}",
+                    userFilterCols, mvAvailableCols,
+                    userFilterCols.stream().filter(s -> !mvAvailableCols.contains(s)).collect(Collectors.toList()) );
             return false;
         }
 
