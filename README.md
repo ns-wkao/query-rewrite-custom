@@ -81,7 +81,6 @@ The project includes JUnit 5 tests that process SQL files from specific director
 2.  **Running Tests**: Use a build tool like Maven or Gradle:
     * **Maven**: `mvn test`
     * **Gradle**: `gradle test`
-    * **Limitation**: Still trying to deal with the Group by Ordinal case (GROUP BY 1), the final test case fails for now
 3.  **Filtering Tests**: You can run a specific test case by setting the `testFilter` system property. For example, to run only tests whose directory name contains "aggregation":
     * `mvn test -DtestFilter=aggregation`
 4.  **Logging**: The tests use `logback.xml` for logging, providing detailed (DEBUG level) output during processing, which is helpful for understanding the rewriting decisions.
