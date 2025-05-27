@@ -16,7 +16,7 @@ import java.util.stream.Stream;
  * Extracts metadata (base table, projections, filters, etc.) from a Trino SQL AST.
  * It uses a visitor pattern to traverse the query structure and now extracts
  * aggregations into structured AggregationInfo objects.
- * (Simplified: No COUNT(*) handling).
+ * It also handles GROUP BY ordinals by resolving them against the SELECT list.
  */
 public class QueryMetadataExtractor {
 
@@ -135,6 +135,7 @@ public class QueryMetadataExtractor {
                 allProjections.addAll(extractProjections(node, baseRelationInfo.alias));
                 allFilters.addAll(extractFilterColumns(node, baseRelationInfo.alias));
                 allAggregations.addAll(extractAggregations(node, baseRelationInfo.alias));
+                // *** Pass the full QuerySpecification to extractGroupBy ***
                 allGroupBys.addAll(extractGroupBy(node, baseRelationInfo.alias));
                 processedMainQuerySpec = true;
             } else if (currentRelationInfo != null) {
@@ -213,7 +214,17 @@ public class QueryMetadataExtractor {
             return cols;
         }
 
+       /**
+         * Extracts GROUP BY columns, resolving ordinals.
+         *
+         * @param spec The QuerySpecification.
+         * @param alias The table alias.
+         * @return A list of GROUP BY column/expression strings.
+         */
        private List<String> extractGroupBy(QuerySpecification spec, Optional<String> alias) {
+            // Get the list of SelectItems to resolve ordinals
+            List<SelectItem> selectItems = spec.getSelect().getSelectItems();
+
             return spec.getGroupBy().stream()
                     .flatMap(gb -> gb.getGroupingElements().stream())
                     .flatMap(ge -> {
@@ -224,7 +235,33 @@ public class QueryMetadataExtractor {
                             return Stream.empty();
                         }
                     })
-                    .map(expr -> normalizeExpression(expr, alias))
+                    .map(expr -> {
+                        // Check if it's an ordinal (LongLiteral)
+                        if (expr instanceof LongLiteral) {
+                            long ordinal = Long.parseLong(((LongLiteral) expr).getValue());
+                            int index = (int) ordinal - 1; // Convert 1-based to 0-based
+
+                            // Map to SelectItem and extract expression
+                            if (index >= 0 && index < selectItems.size()) {
+                                SelectItem item = selectItems.get(index);
+                                if (item instanceof SingleColumn) {
+                                    // Use the expression from the SELECT list
+                                    logger.debug("Resolved GROUP BY ordinal {} to: {}", ordinal, ((SingleColumn) item).getExpression());
+                                    return normalizeExpression(((SingleColumn) item).getExpression(), alias);
+                                } else {
+                                    logger.warn("GROUP BY ordinal {} refers to non-SingleColumn item: {}", ordinal, item);
+                                    return expr; // Fallback: return the literal
+                                }
+                            } else {
+                                logger.warn("GROUP BY ordinal {} is out of bounds (Select list size: {}).", ordinal, selectItems.size());
+                                return expr; // Fallback: return the literal
+                            }
+                        } else {
+                            // It's not an ordinal, process as before
+                            return normalizeExpression(expr, alias);
+                        }
+                    })
+                    // Format the (resolved) expression to string
                     .map(this::formatExpr)
                     .collect(Collectors.toList());
         }

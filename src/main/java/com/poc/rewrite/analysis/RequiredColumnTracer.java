@@ -112,7 +112,7 @@ public class RequiredColumnTracer {
                     }
                 } else {
                     nextNeededColumns.add(neededCol);
-                    logger.warn("Needed column '{}' not found in projections, assuming pass-through.", neededCol);
+                    //logger.warn("Needed column '{}' not found in projections, assuming pass-through.", neededCol);
                 }
             });
         }
