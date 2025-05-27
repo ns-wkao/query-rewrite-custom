@@ -1,87 +1,114 @@
 package com.poc.rewrite;
 
+import com.poc.rewrite.config.AggregationInfo;
 import com.poc.rewrite.config.MaterializedViewMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
+/**
+ * Provides logic to determine if a Materialized View can satisfy a given user query.
+ * Uses structured AggregationInfo for matching and assumes explicit column lists.
+ */
 public class QueryMatcher {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryMatcher.class);
 
     /**
-     * Strip any table/alias qualifier and lowercase.
+     * Strips qualifiers (optional) and lowercases column names for comparison.
+     * Keeps it simple for now, mainly lowercasing and basic quote removal.
+     *
+     * @param cols List of column/expression strings.
+     * @return A Set of normalized strings.
      */
-    private static List<String> unqualify(List<String> cols) {
+    private static Set<String> normalizeColumns(Collection<String> cols) {
+        if (cols == null) {
+            return new HashSet<>();
+        }
         return cols.stream()
-                   .map(c -> {
-                       int dot = c.lastIndexOf('.');
-                       return (dot >= 0 ? c.substring(dot + 1) : c);
-                   })
-                   .map(String::toLowerCase)
-                   .collect(Collectors.toList());
+                .map(c -> {
+                    // Only strip qualifier if a dot exists AND it's not part of a function call
+                    int dot = c.lastIndexOf('.');
+                    return (dot >= 0 && !c.contains("(")) ? c.substring(dot + 1) : c;
+                })
+                .map(c -> c.replace("\"", "")) // Remove quotes
+                .map(String::toLowerCase)       // Convert to lowercase
+                .collect(Collectors.toSet());
     }
 
     /**
      * Determines if a materialized view can satisfy the user query.
      *
-     * @param userMetadata Metadata from the user query.
-     * @param mvMetadata   Metadata from the materialized view.
-     * @return True if the materialized view matches the query, false otherwise.
+     * @param userMetadata Metadata from the user query (refined, explicit columns).
+     * @param mvMetadata   Metadata from the materialized view (explicit columns).
+     * @return True if the materialized view can satisfy the query, false otherwise.
      */
-    public static boolean isMatch(MaterializedViewMetadata userMetadata, MaterializedViewMetadata mvMetadata) {
-        // 1. Base table must match exactly
-        if (!userMetadata.getBaseTable().equals(mvMetadata.getBaseTable())) {
-            logger.info("Base table mismatch: query uses '{}', MV uses '{}'.",
-                         userMetadata.getBaseTable(), mvMetadata.getBaseTable());
+    public static boolean canSatisfy(MaterializedViewMetadata userMetadata, MaterializedViewMetadata mvMetadata) {
+        // 1. Base table must match (case-insensitive)
+        if (!userMetadata.getBaseTable().equalsIgnoreCase(mvMetadata.getBaseTable())) {
+            logger.debug("Base table mismatch: query='{}', mv='{}'",
+                    userMetadata.getBaseTable(), mvMetadata.getBaseTable());
             return false;
         }
 
-        // 2. GROUP BY: MV must contain all user GROUP BY columns (after stripping qualifiers)
-        List<String> userGbs = unqualify(userMetadata.getGroupByColumns());
-        List<String> mvGbs   = unqualify(mvMetadata.getGroupByColumns());
+        // Use Sets for efficient comparison (relies on AggregationInfo.equals/hashCode)
+        Set<AggregationInfo> userAggs = new HashSet<>(userMetadata.getAggregations());
+        Set<AggregationInfo> mvAggs = new HashSet<>(mvMetadata.getAggregations());
+
+        Set<String> userGbs = normalizeColumns(userMetadata.getGroupByColumns());
+        Set<String> mvGbs = normalizeColumns(mvMetadata.getGroupByColumns());
+
+        Set<String> userFilters = normalizeColumns(userMetadata.getFilterColumns());
+        // userProjections now contains the *actual base columns* needed.
+        Set<String> userProjections = normalizeColumns(userMetadata.getProjectionColumns());
+
+        // Available *columns* in MV (Projections + Group-bys)
+        Set<String> mvAvailableColumns = new HashSet<>();
+        mvAvailableColumns.addAll(normalizeColumns(mvMetadata.getProjectionColumns()));
+        mvAvailableColumns.addAll(mvGbs);
+
+
+        // --- Core Matching Logic ---
+
+        // 2. GROUP BY: MV must contain *at least* all user GROUP BY columns.
         if (!mvGbs.containsAll(userGbs)) {
-            logger.info("Group-by mismatch. Query needs {}, MV has {}.", userGbs, mvGbs);
+            logger.info("Group-by mismatch. Query needs {}, MV has {}. Missing: {}",
+                    userGbs, mvGbs, userGbs.stream().filter(u -> !mvGbs.contains(u)).collect(Collectors.toSet()));
             return false;
         }
 
-        // 3. Aggregations: MV must provide all user aggregation expressions
-        List<String> userAggs = unqualify(userMetadata.getAggregations());
-        List<String> mvAggs   = unqualify(mvMetadata.getAggregations());
+        // 3. Aggregations: MV must provide *at least* all user aggregation expressions.
         if (!mvAggs.containsAll(userAggs)) {
-            List<String> missingAggs = userAggs.stream()
-                                               .filter(a -> !mvAggs.contains(a))
-                                               .collect(Collectors.toList());
-            logger.info("Aggregation mismatch. Query requires {}, MV provides {}. Missing {}",
-                         userAggs, mvAggs, missingAggs);
+            logger.info("Aggregation mismatch. Query needs {}, MV has {}. Missing: {}",
+                    userAggs, mvAggs, userAggs.stream().filter(u -> !mvAggs.contains(u)).collect(Collectors.toSet()));
             return false;
         }
 
-        // 4. Filters: MV projections + group-by columns must cover user WHERE columns
-        List<String> userFilters = unqualify(userMetadata.getFilterColumns());
+        // 4. Aggregation Compatibility
+        if (!userAggs.isEmpty() && !mvGbs.containsAll(userGbs)) {
+             logger.info("Group-by set mismatch for aggregated queries (User: {}, MV: {}). Requires exact match for POC.",
+                          userGbs, mvGbs);
+             return false;
+        }
 
-        // Combine MV projections and groupBy as available
-        Set<String> mvAvailable = new HashSet<>();
-        mvAvailable.addAll(unqualify(mvMetadata.getProjectionColumns()));
-        mvAvailable.addAll(mvGbs);
-        List<String> mvAvailList = new ArrayList<>(mvAvailable);
+        // 5. Column Availability: MV must provide all *base columns* needed for filters and projections.
+        Set<String> neededBaseColumns = new HashSet<>();
+        neededBaseColumns.addAll(userFilters);
+        neededBaseColumns.addAll(userProjections);
 
-        if (!mvAvailable.containsAll(userFilters)) {
-            List<String> missing = userFilters.stream()
-                                              .filter(f -> !mvAvailable.contains(f))
-                                              .collect(Collectors.toList());
-            logger.info("Filter mismatch. Query needs {}, MV has {}. Missing {}",
-                         userFilters, mvAvailList, missing);
+        if (!mvAvailableColumns.containsAll(neededBaseColumns)) {
+            logger.info("Column availability mismatch. Query needs {}, MV has {}. Missing: {}",
+                    neededBaseColumns, mvAvailableColumns, neededBaseColumns.stream().filter(n -> !mvAvailableColumns.contains(n)).collect(Collectors.toSet()));
             return false;
         }
 
-        // All checks passed
+        logger.info("Potential match found! UserQuery ~ MV (Base: {}, GB: {}, Aggs: {}, Cols: OK)",
+                mvMetadata.getBaseTable(), userGbs.size(), userAggs.size());
         return true;
     }
 }

@@ -3,6 +3,8 @@ package com.poc.rewrite;
 import com.poc.rewrite.config.MaterializedViewDefinition;
 import com.poc.rewrite.config.MaterializedViewMetadata;
 import com.poc.rewrite.config.PocConfig;
+import com.poc.rewrite.config.TableDefinition;
+import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.*;
 import io.trino.sql.SqlFormatter;
@@ -14,7 +16,6 @@ import org.yaml.snakeyaml.constructor.Constructor;
 
 import java.io.InputStream;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class SQLRewritePoc {
 
@@ -22,25 +23,51 @@ public class SQLRewritePoc {
     private final PocConfig pocConfig;
     private final SqlParser sqlParser;
     private final Map<String, MaterializedViewMetadata> mvMetadataMap = new HashMap<>();
+    private final Set<String> knownBaseTables = new HashSet<>();
+    private final Map<String, TableDefinition> tableDefinitions = new HashMap<>();
+
+
+    private static class RewriteCandidate {
+        final String mvName;
+        final String mvTargetTable;
+        final String baseTableToReplace;
+
+        RewriteCandidate(String mvName, String mvTargetTable, String baseTableToReplace) {
+            this.mvName = mvName;
+            this.mvTargetTable = mvTargetTable;
+            this.baseTableToReplace = baseTableToReplace;
+        }
+    }
 
     public SQLRewritePoc(PocConfig config) {
         this.pocConfig = Objects.requireNonNull(config, "PocConfig cannot be null");
         this.sqlParser = new SqlParser();
 
+        // Store known base tables and their definitions
+        if (config.getTables() != null) {
+            this.knownBaseTables.addAll(config.getTables().keySet());
+            this.tableDefinitions.putAll(config.getTables());
+        }
+
         if (config.getMaterializedViews() != null) {
             config.getMaterializedViews().forEach((mvName, def) -> {
                 try {
+                    logger.info("Loading MV definition for '{}'", mvName);
                     Statement mvStmt = sqlParser.createStatement(def.getDefinition());
+                    // Extract MV metadata - ensure it *doesn't* use *
                     MaterializedViewMetadata metadata = QueryMetadataExtractor.extractMetadataFromQuery(mvStmt);
+
+                    // Validate: MVs should not use '*' (as per our plan)
+                    if (metadata.getProjectionColumns().contains("*")) {
+                        logger.error("MV '{}' uses '*' which is not allowed. Skipping.", mvName);
+                        return;
+                    }
                     mvMetadataMap.put(mvName, metadata);
-                    logger.info("Loaded MV '{}': baseTable={}, cols={}, aggs={}, groupBy={}",
-                            mvName,
-                            metadata.getBaseTable(),
-                            metadata.getProjectionColumns(),
-                            metadata.getAggregations(),
-                            metadata.getGroupByColumns());
+                    logger.info("Loaded MV '{}': baseTable={}", mvName, metadata.getBaseTable());
+                } catch (ParsingException | IllegalArgumentException e) {
+                    logger.error("Failed to load or parse MV '{}': {}", mvName, e.getMessage(), e);
                 } catch (Exception e) {
-                    logger.error("Failed to load MV '{}': {}", mvName, e.getMessage());
+                    logger.error("Unexpected error loading MV '{}': {}", mvName, e.getMessage(), e);
                 }
             });
         }
@@ -48,172 +75,113 @@ public class SQLRewritePoc {
     }
 
     public String processUserQuery(String sql) {
-        //logger.info("Processing query: {}", sql);
-        Statement stmt = sqlParser.createStatement(sql);
+        logger.info("--- Processing Query ---");
+        logger.debug("Original SQL: {}", sql.replace('\n', ' '));
 
         try {
-            if (stmt instanceof Query) {
-                Query query = (Query) stmt;
+            Statement stmt = sqlParser.createStatement(sql);
 
-                // 1) CTE‐rewriting path
-                if (query.getWith().isPresent()) {
-                    With with = query.getWith().get();
-                    QueryBody body = query.getQueryBody();
-
-                    for (WithQuery cte : with.getQueries()) {
-                        String name = cte.getName().getValue();
-                        
-                        // FIXED: Extract metadata from the ENTIRE query (including main SELECT)
-                        // not just the CTE definition
-                        MaterializedViewMetadata cteMeta = QueryMetadataExtractor.extractMetadataFromQuery(stmt);
-
-                        // figure out what the outer query actually needs from this CTE
-                        QueryMetadataExtractor.SourceColumnCollectorVisitor collector =
-                                new QueryMetadataExtractor.SourceColumnCollectorVisitor(name);
-                        Set<String> needed = new HashSet<>();
-                        collector.process(body, needed);
-
-                        boolean outerUsesStar = collector.isStarFound();
-                        boolean cteHasStar    = cteMeta.getProjectionColumns().contains("*");
-
-                        for (Map.Entry<String, MaterializedViewMetadata> e : mvMetadataMap.entrySet()) {
-                            MaterializedViewMetadata mvMeta = e.getValue();
-                            boolean mvIsAgg = !mvMeta.getGroupByColumns().isEmpty();
-
-                            // CASE A: CTE did a SELECT * but outer never did cte.*, so only 'needed' cols matter
-                            if (cteHasStar && !outerUsesStar) {
-                                logger.info("CTE has * but outer query is limited to specific columns");
-                                if (!mvProvidesAll(mvMeta, needed)) {
-                                    logger.info("MV does not cover required columns");
-                                    continue;
-                                }
-                            }
-                            // CASE B: otherwise fall back to full-match logic
-                            else {
-                                // also guard: if outer did use cte.*, and MV is aggregated we can't rewrite
-                                if (outerUsesStar && mvIsAgg) {
-                                    logger.info("Outer query has * but MV is aggregation");
-                                    continue;
-                                }
-                                logger.info("Matching {} in CTE", e.getKey());
-                                if (!QueryMatcher.isMatch(cteMeta, mvMeta)) {
-                                    continue;
-                                }
-                            }
-
-                            // CTE→MV match found
-                            logger.info("Rewriting CTE '{}' using MV '{}'.", name, e.getKey());
-                            String target = pocConfig.getMaterializedViews()
-                                                    .get(e.getKey())
-                                                    .getTargetTable();
-                            return rewriteAst(stmt, cteMeta, target);
-                        }
-                    }
-                }
-
-                // 2) Main‐query fallback
-                MaterializedViewMetadata mainMeta = QueryMetadataExtractor.extractMetadataFromQuery(stmt);
-                boolean mainHasStar = mainMeta.getProjectionColumns().contains("*");
-
-                for (Map.Entry<String, MaterializedViewMetadata> e : mvMetadataMap.entrySet()) {
-                    MaterializedViewMetadata mvMeta = e.getValue();
-                    boolean mvIsAgg = !mvMeta.getGroupByColumns().isEmpty();
-
-                    // if the final SELECT is a bare "*", aggregated MV can't satisfy it
-                    if (mainHasStar && mvIsAgg) {
-                        continue;
-                    }
-                    logger.info("Matching {} in main query", e.getKey());
-                    if (!QueryMatcher.isMatch(mainMeta, mvMeta)) {
-                        continue;
-                    }
-
-                    // check that the MV actually provides all explicit columns & filters
-                    Set<String> needed = new HashSet<>();
-                    if (!mainHasStar) {
-                        // non-star: need every proj + filter
-                        needed.addAll(mainMeta.getProjectionColumns().stream()
-                                            .map(String::toLowerCase)
-                                            .collect(Collectors.toSet()));
-                    } else {
-                        // star + matched: still need any explicit non-"*" projections
-                        needed.addAll(mainMeta.getProjectionColumns().stream()
-                                            .filter(col -> !col.equals("*"))
-                                            .map(String::toLowerCase)
-                                            .collect(Collectors.toSet()));
-                    }
-                    // filters always count
-                    needed.addAll(mainMeta.getFilterColumns().stream()
-                                        .map(String::toLowerCase)
-                                        .collect(Collectors.toSet()));
-
-                    if (!mvProvidesAll(mvMeta, needed)) {
-                        continue;
-                    }
-
-                    logger.info("Rewriting main query using MV '{}'.", e.getKey());
-                    String target = pocConfig.getMaterializedViews()
-                                            .get(e.getKey())
-                                            .getTargetTable();
-                    return rewriteAst(stmt, mainMeta, target);
-                }
-            }
-            else {
+            if (!(stmt instanceof Query)) {
                 logger.warn("Not a SELECT query, skipping rewrite.");
+                return sql;
             }
+            Query query = (Query) stmt;
+
+            // 1. Extract initial metadata
+            MaterializedViewMetadata initialUserMeta = QueryMetadataExtractor.extractMetadataFromQuery(query);
+            logger.info("User query initial metadata extracted for base table: {}", initialUserMeta.getBaseTable());
+
+            // 2. Trace required columns
+            RequiredColumnTracer tracer = new RequiredColumnTracer(query, knownBaseTables);
+            Map<String, Set<String>> requiredColsMap = tracer.getRequiredBaseColumns();
+
+            // We only support single base table, so get its required columns.
+            // If the map is empty or has multiple entries, we can't handle it now.
+            if (requiredColsMap.size() != 1) {
+                logger.warn("Query tracer found {} base tables. Only single-table queries are supported for rewrite. No rewrite.", requiredColsMap.size());
+                return sql;
+            }
+            Set<String> requiredColumns = requiredColsMap.values().iterator().next();
+            logger.info("Traced required columns: {}", requiredColumns);
+
+            // 3. Create Refined Metadata
+            MaterializedViewMetadata refinedUserMeta = new MaterializedViewMetadata();
+            refinedUserMeta.setBaseTable(initialUserMeta.getBaseTable());
+            refinedUserMeta.setTableAlias(initialUserMeta.getTableAlias());
+            refinedUserMeta.setFilterColumns(initialUserMeta.getFilterColumns());
+            refinedUserMeta.setAggregations(initialUserMeta.getAggregations());
+            refinedUserMeta.setGroupByColumns(initialUserMeta.getGroupByColumns());
+            refinedUserMeta.setProjectionColumns(new ArrayList<>(requiredColumns)); // Use traced columns
+
+            // 4. Find a suitable MV candidate using refined metadata
+            RewriteCandidate candidate = findRewriteCandidate(refinedUserMeta);
+
+            // 5. Perform rewrite if a candidate is found
+            if (candidate != null) {
+                logger.info("Found suitable MV '{}'. Rewriting query.", candidate.mvName);
+                return rewriteAst(stmt, candidate.baseTableToReplace, candidate.mvTargetTable);
+            } else {
+                logger.info("No suitable MV found. Returning original query.");
+                return sql;
+            }
+
+        } catch (UnsupportedOperationException e) {
+            logger.warn("Query not supported for rewrite (likely needs '*' from base table): {}", e.getMessage());
+            return sql;
         }
         catch (Exception ex) {
-            logger.error("Rewrite failed: {}", ex.getMessage(), ex);
+            logger.error("Error during query processing or rewrite: {}", ex.getMessage(), ex);
+            return sql;
+        } finally {
+            logger.info("--- Finished Processing ---");
         }
-
-        logger.info("No rewrite applied, returning original SQL.");
-        return sql;
     }
 
+    /**
+     * Finds a candidate using the *refined* user metadata.
+     */
+    private RewriteCandidate findRewriteCandidate(MaterializedViewMetadata refinedUserMeta) {
+        for (Map.Entry<String, MaterializedViewMetadata> entry : mvMetadataMap.entrySet()) {
+            String mvName = entry.getKey();
+            MaterializedViewMetadata mvMeta = entry.getValue();
 
-    private String rewriteAst(Statement original, MaterializedViewMetadata meta, String mvTarget) {
-        String base = meta.getBaseTable();
-        
-        // Fixed QualifiedName creation - handle single part vs multiple parts
-        String[] parts = mvTarget.split("\\.");
-        QualifiedName target;
+            logger.info("Checking MV '{}' against refined user query...", mvName);
+
+            // Use QueryMatcher with refined (explicit) metadata
+            if (QueryMatcher.canSatisfy(refinedUserMeta, mvMeta)) {
+                MaterializedViewDefinition mvDef = pocConfig.getMaterializedViews().get(mvName);
+                if (mvDef != null) {
+                    return new RewriteCandidate(mvName, mvDef.getTargetTable(), refinedUserMeta.getBaseTable());
+                } else {
+                    logger.error("Internal error: Found matching MV '{}' but couldn't find its definition.", mvName);
+                }
+            }
+        }
+        return null;
+    }
+
+    private String rewriteAst(Statement originalStatement, String baseTableToReplace, String mvTargetTable) {
+        String[] parts = mvTargetTable.split("\\.");
+        QualifiedName targetQualifiedName;
         if (parts.length == 1) {
-            target = QualifiedName.of(parts[0]);
+            targetQualifiedName = QualifiedName.of(parts[0]);
         } else {
             // For multiple parts, use the varargs version: of(first, rest...)
             String first = parts[0];
             String[] rest = new String[parts.length - 1];
             System.arraycopy(parts, 1, rest, 0, parts.length - 1);
-            target = QualifiedName.of(first, rest);
+            targetQualifiedName = QualifiedName.of(first, rest);
         }
-        
-        TableReplacingVisitor v = new TableReplacingVisitor(base, target);
-        Statement out = (Statement) v.process(original, null);
-        if (!v.didChange()) {
-            logger.warn("AST rewrite did not change anything.");
-        }
-        return SqlFormatter.formatSql(out);
-    }
+        logger.debug("Rewriting AST: Replacing '{}' with '{}'", baseTableToReplace, targetQualifiedName);
+        TableReplacingVisitor visitor = new TableReplacingVisitor(baseTableToReplace, targetQualifiedName);
+        Statement rewrittenStatement = (Statement) visitor.process(originalStatement, null);
 
-    /**
-     * Check if MV metadata provides all needed columns/expressions.
-     */
-    private boolean mvProvidesAll(MaterializedViewMetadata mvMeta, Set<String> needed) {
-        Set<String> avail = new HashSet<>();
-        mvMeta.getProjectionColumns().forEach(c -> avail.add(c.toLowerCase()));
-        mvMeta.getAggregations().forEach(c -> avail.add(c.toLowerCase()));
-        mvMeta.getGroupByColumns().forEach(c -> avail.add(c.toLowerCase()));
-        
-        boolean result = avail.containsAll(needed);
-        
-        if (!result) {
-            Set<String> missing = new HashSet<>(needed);
-            missing.removeAll(avail);
-            logger.debug("MV does not provide all needed columns. Missing: {}, Available: {}, Needed: {}", 
-                    missing, avail, needed);
+        if (!visitor.didChange()) {
+            logger.warn("TableReplacingVisitor ran but did not report any changes. Base table name ('{}') might be incorrect or not found in AST.", baseTableToReplace);
+        } else {
+             logger.info("AST rewrite successful.");
         }
-        
-        return result;
+        return SqlFormatter.formatSql(rewrittenStatement);
     }
 
     public static PocConfig loadConfig(String filename) {
@@ -222,11 +190,11 @@ public class SQLRewritePoc {
         Yaml yaml = new Yaml(new Constructor(PocConfig.class, opts));
         try (InputStream in = SQLRewritePoc.class.getClassLoader().getResourceAsStream(filename)) {
             if (in == null) {
-                throw new RuntimeException("Config not found: " + filename);
+                throw new RuntimeException("Config file not found in classpath: " + filename);
             }
             return yaml.load(in);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to load config: " + e.getMessage(), e);
+            throw new RuntimeException("Failed to load or parse config: " + filename, e);
         }
     }
 }

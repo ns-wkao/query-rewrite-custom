@@ -1,15 +1,15 @@
 package com.poc.rewrite.config;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.ArrayList; // Import ArrayList
+import com.poc.rewrite.config.AggregationInfo;
 
 public class MaterializedViewMetadata {
     private String baseTable;
     private Optional<String> tableAlias = Optional.empty();
     private List<String> projectionColumns = new ArrayList<>();
-    private List<String> aggregations = new ArrayList<>();
+    private List<AggregationInfo> aggregations = new ArrayList<>();
     private List<String> groupByColumns = new ArrayList<>();
     private List<String> filterColumns = new ArrayList<>();
 
@@ -24,8 +24,8 @@ public class MaterializedViewMetadata {
     public List<String> getProjectionColumns() { return projectionColumns; }
     public void setProjectionColumns(List<String> projectionColumns) { this.projectionColumns = projectionColumns; }
 
-    public List<String> getAggregations() { return aggregations; }
-    public void setAggregations(List<String> aggregations) { this.aggregations = aggregations; }
+    public List<AggregationInfo> getAggregations() { return aggregations; }
+    public void setAggregations(List<AggregationInfo> aggregations) { this.aggregations = aggregations; }
 
     public List<String> getGroupByColumns() { return groupByColumns; }
     public void setGroupByColumns(List<String> groupByColumns) { this.groupByColumns = groupByColumns; }

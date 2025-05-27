@@ -1,5 +1,5 @@
 tables:
-  '"redshift_poc_iceberg"."alert_v3"':
+  'redshift_poc_iceberg.alert_v3':
     schema:
       - action: VARCHAR
       - policy: VARCHAR
@@ -29,27 +29,6 @@ materializedViews:
       FROM "redshift_poc_iceberg"."alert_v3"
       GROUP BY ns_tenant_id, alert_type
     targetTable: poc_mvs.mv_simple_agg
-
-  MV_AGG_WITH_POLICY:
-    definition: >
-      SELECT ns_tenant_id, alert_type, policy, SUM("count") AS count
-      FROM "redshift_poc_iceberg"."alert_v3"
-      GROUP BY ns_tenant_id, alert_type, policy
-    targetTable: poc_mvs.mv_agg_with_policy
-
-  MV_ALERT_V3_ALIAS_DERIVED:
-    definition: >
-      SELECT
-        timestamp,
-        ns_tenant_id,
-        action,
-        policy,
-        transaction_id,
-        SPLIT(organization_unit, '/'),
-        CONCAT(app, instance_id)
-      FROM
-        "redshift_poc_iceberg"."alert_v3"
-    targetTable: redshift_poc_iceberg.mv_alert_v3_alias_derived
 
   MV_ALERT_EVENT_DAILY_AGG:
     definition: >
