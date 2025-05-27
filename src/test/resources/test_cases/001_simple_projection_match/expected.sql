@@ -1,1 +1,1 @@
-SELECT ns_tenant_id, alert_type, "action" FROM "poc_mvs"."mv_simple_projection"
+SELECT ns_tenant_id, alert_type, "action" FROM poc_mvs.mv_simple_projection

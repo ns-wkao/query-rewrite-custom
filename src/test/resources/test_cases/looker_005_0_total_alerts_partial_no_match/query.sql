@@ -1,5 +1,4 @@
 SELECT A.* ,
-        -- Derive OU levels
         SPLIT(A.organization_unit, '/')  AS OU,
         CONCAT(A.app, A.instance_id) AS ns_app_instance
         FROM "redshift_poc_iceberg"."alert_v3" AS A

@@ -49,6 +49,7 @@ public class SqlRewriteFileBasedTest {
     }
 
     static Stream<Arguments> sqlFileProvider() throws IOException, URISyntaxException {
+        String filter = System.getProperty("testFilter");
         URL resourceUrl = SqlRewriteFileBasedTest.class.getClassLoader().getResource(TEST_CASES_BASE_RESOURCE_DIR);
         Path baseDirPath;
 
@@ -67,27 +68,18 @@ public class SqlRewriteFileBasedTest {
         }
 
         List<Arguments> testArguments = new ArrayList<>();
-        if (Files.isDirectory(baseDirPath)) {
-            try (Stream<Path> testCaseDirs = Files.list(baseDirPath).filter(Files::isDirectory)) {
-                testCaseDirs.forEach(testCaseDir -> {
-                    Path querySqlFile = testCaseDir.resolve("query.sql");
-                    Path expectedSqlFile = testCaseDir.resolve("expected.sql");
-                    // Each test case directory must contain both query.sql and expected.sql
-                    if (Files.exists(querySqlFile) && Files.isRegularFile(querySqlFile) &&
-                        Files.exists(expectedSqlFile) && Files.isRegularFile(expectedSqlFile)) {
-                        testArguments.add(Arguments.of(querySqlFile, testCaseDir.getFileName().toString()));
-                    } else {
-                        logger.warn("Skipping test case directory '{}': missing 'query.sql' and/or 'expected.sql'.", 
-                                    testCaseDir.getFileName().toString());
-                    }
-                });
-            }
-        } else {
-            logger.warn("Base directory for test cases is not a directory: {}", baseDirPath.toAbsolutePath());
-        }
-        
-        if (testArguments.isEmpty()){
-            logger.warn("No valid test cases (folders with query.sql and expected.sql) found in {}", baseDirPath.toAbsolutePath());
+        try (Stream<Path> dirs = Files.list(baseDirPath).filter(Files::isDirectory)) {
+            dirs.forEach(testCaseDir -> {
+                String name = testCaseDir.getFileName().toString();
+                if (filter != null && !name.contains(filter)) {
+                    return;
+                }
+                Path q = testCaseDir.resolve("query.sql");
+                Path e = testCaseDir.resolve("expected.sql");
+                if (Files.exists(q) && Files.exists(e)) {
+                    testArguments.add(Arguments.of(q, name));
+                }
+            });
         }
         return testArguments.stream();
     }
@@ -108,7 +100,7 @@ public class SqlRewriteFileBasedTest {
         // Read original query
         originalSql = new String(Files.readAllBytes(querySqlFilePath), StandardCharsets.UTF_8)
                           .replace("\uFEFF", "").trim();
-        logger.info("Original SQL from 'query.sql' for [{}]:\n{}", testCaseName, originalSql);
+        //logger.info("Original SQL from 'query.sql' for [{}]:\n{}", testCaseName, originalSql);
 
         if (originalSql.isEmpty()) {
             logger.warn("Input 'query.sql' in test case [{}] is empty. Test considered vacuously passed.", testCaseName);
@@ -117,13 +109,13 @@ public class SqlRewriteFileBasedTest {
 
         // Perform rewrite
         rewrittenSql = pocInstance.processUserQuery(originalSql).trim();
-        logger.info("Rewritten SQL for [{}]:\n{}", testCaseName, rewrittenSql);
+        //logger.info("Rewritten SQL for [{}]:\n{}", testCaseName, rewrittenSql);
 
         // Read expected query
         Path expectedSqlFilePath = querySqlFilePath.resolveSibling("expected.sql");
         expectedSql = new String(Files.readAllBytes(expectedSqlFilePath), StandardCharsets.UTF_8)
                                  .replace("\uFEFF", "").trim();
-        logger.info("Expected SQL from 'expected.sql' for [{}]:\n{}", testCaseName, expectedSql);
+        //logger.info("Expected SQL from 'expected.sql' for [{}]:\n{}", testCaseName, expectedSql);
 
         // Normalize SQL strings for comparison
         String normalizedRewrittenSql = normalizeSql(rewrittenSql);

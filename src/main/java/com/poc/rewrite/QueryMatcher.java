@@ -1,86 +1,87 @@
 package com.poc.rewrite;
 
 import com.poc.rewrite.config.MaterializedViewMetadata;
-// import com.poc.rewrite.QueryMetadataExtractor;
-// import io.trino.sql.tree.Statement; 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-// List, Map, Set, Collectors imports are used by the remaining isMatch method
-import java.util.Set; 
+import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class QueryMatcher {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryMatcher.class);
 
     /**
+     * Strip any table/alias qualifier and lowercase.
+     */
+    private static List<String> unqualify(List<String> cols) {
+        return cols.stream()
+                   .map(c -> {
+                       int dot = c.lastIndexOf('.');
+                       return (dot >= 0 ? c.substring(dot + 1) : c);
+                   })
+                   .map(String::toLowerCase)
+                   .collect(Collectors.toList());
+    }
+
+    /**
      * Determines if a materialized view can satisfy the user query.
      *
      * @param userMetadata Metadata from the user query.
-     * @param mvMetadata Metadata from the materialized view.
+     * @param mvMetadata   Metadata from the materialized view.
      * @return True if the materialized view matches the query, false otherwise.
      */
     public static boolean isMatch(MaterializedViewMetadata userMetadata, MaterializedViewMetadata mvMetadata) {
-        // Check base table match
+        // 1. Base table must match exactly
         if (!userMetadata.getBaseTable().equals(mvMetadata.getBaseTable())) {
-            logger.debug("Base table mismatch: query uses '{}', MV uses '{}'.",
-                    userMetadata.getBaseTable(), mvMetadata.getBaseTable());
+            logger.info("Base table mismatch: query uses '{}', MV uses '{}'.",
+                         userMetadata.getBaseTable(), mvMetadata.getBaseTable());
             return false;
         }
 
-        // Check non-aggregated (group-by) columns
-        // The MV must contain all group-by columns required by the user query.
-        if (!mvMetadata.getGroupByColumns().containsAll(userMetadata.getGroupByColumns())) {
-            logger.debug("Group-by columns mismatch. Query requires: {}, MV provides: {}.",
-                    userMetadata.getGroupByColumns(), mvMetadata.getGroupByColumns());
+        // 2. GROUP BY: MV must contain all user GROUP BY columns (after stripping qualifiers)
+        List<String> userGbs = unqualify(userMetadata.getGroupByColumns());
+        List<String> mvGbs   = unqualify(mvMetadata.getGroupByColumns());
+        if (!mvGbs.containsAll(userGbs)) {
+            logger.info("Group-by mismatch. Query needs {}, MV has {}.", userGbs, mvGbs);
             return false;
         }
 
-        // Check aggregated columns by function name
-        // The MV must provide all types of aggregations (e.g., SUM, COUNT) required by the user query.
-        List<String> userAggs = userMetadata.getAggregations();
-        List<String> mvAggs = mvMetadata.getAggregations();
-
+        // 3. Aggregations: MV must provide all user aggregation expressions
+        List<String> userAggs = unqualify(userMetadata.getAggregations());
+        List<String> mvAggs   = unqualify(mvMetadata.getAggregations());
         if (!mvAggs.containsAll(userAggs)) {
-            logger.debug("Aggregation mismatch. Query requires aggregations: {}, MV provides aggregations: {}. User aggs not found in MV: {}",
-                    userAggs, mvAggs,
-                    userAggs.stream().filter(s -> !mvAggs.contains(s)).collect(Collectors.toList()));
-            return false;
-        }
-        
-        Set<String> userProjectionStrings = userMetadata.getProjectionColumns().stream()
-                .collect(Collectors.toSet());
-        Set<String> mvProjectionStrings = mvMetadata.getProjectionColumns().stream()
-                .collect(Collectors.toSet());
-
-        if (!mvProjectionStrings.containsAll(userProjectionStrings)) {
-            logger.debug("Projection columns mismatch. Query requires projection items: {}, MV provides projection items: {}. User query items not found in MV: {}",
-                    userProjectionStrings, mvProjectionStrings,
-                    userProjectionStrings.stream().filter(s -> !mvProjectionStrings.contains(s)).collect(Collectors.toSet()));
+            List<String> missingAggs = userAggs.stream()
+                                               .filter(a -> !mvAggs.contains(a))
+                                               .collect(Collectors.toList());
+            logger.info("Aggregation mismatch. Query requires {}, MV provides {}. Missing {}",
+                         userAggs, mvAggs, missingAggs);
             return false;
         }
 
-        
+        // 4. Filters: MV projections + group-by columns must cover user WHERE columns
+        List<String> userFilters = unqualify(userMetadata.getFilterColumns());
 
-        // Check if MV provides all columns needed by user's WHERE clause
-        List<String> userFilterCols = userMetadata.getFilterColumns();
-        Set<String> mvAvailableCols = new HashSet<>(mvMetadata.getProjectionColumns());
-        mvAvailableCols.addAll(mvMetadata.getGroupByColumns()); // Group-by cols can also be used
+        // Combine MV projections and groupBy as available
+        Set<String> mvAvailable = new HashSet<>();
+        mvAvailable.addAll(unqualify(mvMetadata.getProjectionColumns()));
+        mvAvailable.addAll(mvGbs);
+        List<String> mvAvailList = new ArrayList<>(mvAvailable);
 
-        logger.info("QueryMatcher DEBUG - MV Key (if known, otherwise N/A)"); // You might not have MV key here easily
-        logger.info("QueryMatcher DEBUG - User Filter Cols: {}", userFilterCols);
-        logger.info("QueryMatcher DEBUG - MV Available Cols (for filter check): {}", mvAvailableCols);
-
-        if (!mvAvailableCols.containsAll(userFilterCols)) {
-            logger.debug("Filter columns mismatch. Query WHERE needs: {}, MV provides (Projections + GroupBy): {}. Missing: {}",
-                    userFilterCols, mvAvailableCols,
-                    userFilterCols.stream().filter(s -> !mvAvailableCols.contains(s)).collect(Collectors.toList()) );
+        if (!mvAvailable.containsAll(userFilters)) {
+            List<String> missing = userFilters.stream()
+                                              .filter(f -> !mvAvailable.contains(f))
+                                              .collect(Collectors.toList());
+            logger.info("Filter mismatch. Query needs {}, MV has {}. Missing {}",
+                         userFilters, mvAvailList, missing);
             return false;
         }
 
+        // All checks passed
         return true;
     }
 }

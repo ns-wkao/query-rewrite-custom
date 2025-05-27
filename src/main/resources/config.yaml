@@ -40,7 +40,6 @@ materializedViews:
   MV_ALERT_V3_ALIAS_DERIVED:
     definition: >
       SELECT
-        *,
         timestamp,
         ns_tenant_id,
         action,
@@ -58,8 +57,8 @@ materializedViews:
         date_trunc('day', timestamp)  AS timestamp,
         ns_tenant_id,
         alert_type,
-        SPLIT(organization_unit, '/'),
-        CONCAT(app, instance_id),
+        SPLIT(organization_unit, '/') AS OU,
+        CONCAT(app, instance_id) AS ns_app_instance,
         SUM("count")   AS count
       FROM
         "redshift_poc_iceberg"."alert_v3"
