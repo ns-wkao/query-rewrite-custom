@@ -90,14 +90,7 @@ public class RewriteMatcher {
             return false;
         }
 
-        // 4. Aggregation Compatibility
-        if (!userAggs.isEmpty() && !mvGbs.containsAll(userGbs)) {
-             logger.info("Group-by set mismatch for aggregated queries (User: {}, MV: {}). Requires exact match for POC.",
-                          userGbs, mvGbs);
-             return false;
-        }
-
-        // 5. Column Availability: MV must provide all *base columns* needed for filters and projections.
+        // 4. Column Availability: MV must provide all *base columns* needed for filters and projections.
         Set<String> neededBaseColumns = new HashSet<>();
         neededBaseColumns.addAll(userFilters);
         neededBaseColumns.addAll(userProjections);
