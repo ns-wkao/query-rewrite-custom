@@ -1,9 +1,14 @@
 package com.poc.rewrite;
 
+import com.poc.rewrite.analysis.QueryMetadataExtractor;
+import com.poc.rewrite.analysis.RequiredColumnTracer;
 import com.poc.rewrite.config.MaterializedViewDefinition;
-import com.poc.rewrite.config.MaterializedViewMetadata;
 import com.poc.rewrite.config.PocConfig;
 import com.poc.rewrite.config.TableDefinition;
+import com.poc.rewrite.model.QueryMetadata;
+import com.poc.rewrite.rewriting.RewriteMatcher;
+import com.poc.rewrite.rewriting.TableReplacerVisitor;
+
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.*;
@@ -17,12 +22,12 @@ import org.yaml.snakeyaml.constructor.Constructor;
 import java.io.InputStream;
 import java.util.*;
 
-public class SQLRewritePoc {
+public class SQLRewriter {
 
-    private static final Logger logger = LoggerFactory.getLogger(SQLRewritePoc.class);
+    private static final Logger logger = LoggerFactory.getLogger(SQLRewriter.class);
     private final PocConfig pocConfig;
     private final SqlParser sqlParser;
-    private final Map<String, MaterializedViewMetadata> mvMetadataMap = new HashMap<>();
+    private final Map<String, QueryMetadata> mvMetadataMap = new HashMap<>();
     private final Set<String> knownBaseTables = new HashSet<>();
     private final Map<String, TableDefinition> tableDefinitions = new HashMap<>();
 
@@ -39,7 +44,7 @@ public class SQLRewritePoc {
         }
     }
 
-    public SQLRewritePoc(PocConfig config) {
+    public SQLRewriter(PocConfig config) {
         this.pocConfig = Objects.requireNonNull(config, "PocConfig cannot be null");
         this.sqlParser = new SqlParser();
 
@@ -55,7 +60,7 @@ public class SQLRewritePoc {
                     logger.info("Loading MV definition for '{}'", mvName);
                     Statement mvStmt = sqlParser.createStatement(def.getDefinition());
                     // Extract MV metadata - ensure it *doesn't* use *
-                    MaterializedViewMetadata metadata = QueryMetadataExtractor.extractMetadataFromQuery(mvStmt);
+                    QueryMetadata metadata = QueryMetadataExtractor.extractMetadataFromQuery(mvStmt);
 
                     // Validate: MVs should not use '*' (as per our plan)
                     if (metadata.getProjectionColumns().contains("*")) {
@@ -88,7 +93,7 @@ public class SQLRewritePoc {
             Query query = (Query) stmt;
 
             // 1. Extract initial metadata
-            MaterializedViewMetadata initialUserMeta = QueryMetadataExtractor.extractMetadataFromQuery(query);
+            QueryMetadata initialUserMeta = QueryMetadataExtractor.extractMetadataFromQuery(query);
             logger.info("User query initial metadata extracted for base table: {}", initialUserMeta.getBaseTable());
 
             // 2. Trace required columns
@@ -105,7 +110,7 @@ public class SQLRewritePoc {
             logger.info("Traced required columns: {}", requiredColumns);
 
             // 3. Create Refined Metadata
-            MaterializedViewMetadata refinedUserMeta = new MaterializedViewMetadata();
+            QueryMetadata refinedUserMeta = new QueryMetadata();
             refinedUserMeta.setBaseTable(initialUserMeta.getBaseTable());
             refinedUserMeta.setTableAlias(initialUserMeta.getTableAlias());
             refinedUserMeta.setFilterColumns(initialUserMeta.getFilterColumns());
@@ -140,15 +145,15 @@ public class SQLRewritePoc {
     /**
      * Finds a candidate using the *refined* user metadata.
      */
-    private RewriteCandidate findRewriteCandidate(MaterializedViewMetadata refinedUserMeta) {
-        for (Map.Entry<String, MaterializedViewMetadata> entry : mvMetadataMap.entrySet()) {
+    private RewriteCandidate findRewriteCandidate(QueryMetadata refinedUserMeta) {
+        for (Map.Entry<String, QueryMetadata> entry : mvMetadataMap.entrySet()) {
             String mvName = entry.getKey();
-            MaterializedViewMetadata mvMeta = entry.getValue();
+            QueryMetadata mvMeta = entry.getValue();
 
             logger.info("Checking MV '{}' against refined user query...", mvName);
 
             // Use QueryMatcher with refined (explicit) metadata
-            if (QueryMatcher.canSatisfy(refinedUserMeta, mvMeta)) {
+            if (RewriteMatcher.canSatisfy(refinedUserMeta, mvMeta)) {
                 MaterializedViewDefinition mvDef = pocConfig.getMaterializedViews().get(mvName);
                 if (mvDef != null) {
                     return new RewriteCandidate(mvName, mvDef.getTargetTable(), refinedUserMeta.getBaseTable());
@@ -173,7 +178,7 @@ public class SQLRewritePoc {
             targetQualifiedName = QualifiedName.of(first, rest);
         }
         logger.debug("Rewriting AST: Replacing '{}' with '{}'", baseTableToReplace, targetQualifiedName);
-        TableReplacingVisitor visitor = new TableReplacingVisitor(baseTableToReplace, targetQualifiedName);
+        TableReplacerVisitor visitor = new TableReplacerVisitor(baseTableToReplace, targetQualifiedName);
         Statement rewrittenStatement = (Statement) visitor.process(originalStatement, null);
 
         if (!visitor.didChange()) {
@@ -188,7 +193,7 @@ public class SQLRewritePoc {
         LoaderOptions opts = new LoaderOptions();
         opts.setAllowDuplicateKeys(false);
         Yaml yaml = new Yaml(new Constructor(PocConfig.class, opts));
-        try (InputStream in = SQLRewritePoc.class.getClassLoader().getResourceAsStream(filename)) {
+        try (InputStream in = SQLRewriter.class.getClassLoader().getResourceAsStream(filename)) {
             if (in == null) {
                 throw new RuntimeException("Config file not found in classpath: " + filename);
             }

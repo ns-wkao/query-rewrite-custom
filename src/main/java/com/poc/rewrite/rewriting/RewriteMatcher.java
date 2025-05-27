@@ -1,7 +1,8 @@
-package com.poc.rewrite;
+package com.poc.rewrite.rewriting;
 
-import com.poc.rewrite.config.AggregationInfo;
-import com.poc.rewrite.config.MaterializedViewMetadata;
+import com.poc.rewrite.model.AggregationInfo;
+import com.poc.rewrite.model.QueryMetadata;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,9 +16,9 @@ import java.util.stream.Collectors;
  * Provides logic to determine if a Materialized View can satisfy a given user query.
  * Uses structured AggregationInfo for matching and assumes explicit column lists.
  */
-public class QueryMatcher {
+public class RewriteMatcher {
 
-    private static final Logger logger = LoggerFactory.getLogger(QueryMatcher.class);
+    private static final Logger logger = LoggerFactory.getLogger(RewriteMatcher.class);
 
     /**
      * Strips qualifiers (optional) and lowercases column names for comparison.
@@ -48,7 +49,7 @@ public class QueryMatcher {
      * @param mvMetadata   Metadata from the materialized view (explicit columns).
      * @return True if the materialized view can satisfy the query, false otherwise.
      */
-    public static boolean canSatisfy(MaterializedViewMetadata userMetadata, MaterializedViewMetadata mvMetadata) {
+    public static boolean canSatisfy(QueryMetadata userMetadata, QueryMetadata mvMetadata) {
         // 1. Base table must match (case-insensitive)
         if (!userMetadata.getBaseTable().equalsIgnoreCase(mvMetadata.getBaseTable())) {
             logger.debug("Base table mismatch: query='{}', mv='{}'",

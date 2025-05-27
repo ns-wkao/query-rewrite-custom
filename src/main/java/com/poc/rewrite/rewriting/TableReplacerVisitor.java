@@ -1,4 +1,4 @@
-package com.poc.rewrite;
+package com.poc.rewrite.rewriting;
 
 import io.trino.sql.tree.AliasedRelation;
 import io.trino.sql.tree.AstVisitor;
@@ -20,12 +20,12 @@ import java.util.Objects;
 import java.util.Optional;
 
 
-public class TableReplacingVisitor extends AstVisitor<Node, Void> {
+public class TableReplacerVisitor extends AstVisitor<Node, Void> {
     private final String originalTableStringToMatch;
     private final QualifiedName newTableQualifiedName;
     private boolean changed = false;
 
-    public TableReplacingVisitor(String originalTableStringToMatch, QualifiedName newTableQualifiedName) {
+    public TableReplacerVisitor(String originalTableStringToMatch, QualifiedName newTableQualifiedName) {
         this.originalTableStringToMatch = Objects.requireNonNull(originalTableStringToMatch, "originalTableStringToMatch is null");
         this.newTableQualifiedName = Objects.requireNonNull(newTableQualifiedName, "newTableQualifiedName is null");
     }

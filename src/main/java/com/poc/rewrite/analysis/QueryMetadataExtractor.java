@@ -1,7 +1,8 @@
-package com.poc.rewrite;
+package com.poc.rewrite.analysis;
 
-import com.poc.rewrite.config.AggregationInfo; // Import the new class
-import com.poc.rewrite.config.MaterializedViewMetadata;
+import com.poc.rewrite.model.AggregationInfo;
+import com.poc.rewrite.model.QueryMetadata;
+
 import io.trino.sql.SqlFormatter;
 import io.trino.sql.tree.*;
 import org.slf4j.Logger;
@@ -46,13 +47,13 @@ public class QueryMetadataExtractor {
      * @return The extracted MaterializedViewMetadata.
      * @throws IllegalArgumentException if the statement is not a Query or metadata cannot be extracted.
      */
-    public static MaterializedViewMetadata extractMetadataFromQuery(Statement queryStatement) {
+    public static QueryMetadata extractMetadataFromQuery(Statement queryStatement) {
         if (!(queryStatement instanceof Query)) {
             throw new IllegalArgumentException("Expected a Query statement but got: " + queryStatement.getClass().getSimpleName());
         }
 
         MetadataVisitor visitor = new MetadataVisitor();
-        MaterializedViewMetadata metadata = visitor.process((Query) queryStatement);
+        QueryMetadata metadata = visitor.process((Query) queryStatement);
 
         logger.info("Extracted metadata: baseTable={}, alias={}, projections={}, groupBy={}, aggregations={}, filters={}",
                 metadata.getBaseTable(),
@@ -70,7 +71,7 @@ public class QueryMetadataExtractor {
      */
     private static class MetadataVisitor extends AstVisitor<Void, MetadataVisitor.Context> {
 
-        private final MaterializedViewMetadata metadata = new MaterializedViewMetadata();
+        private final QueryMetadata metadata = new QueryMetadata();
         private final Set<String> allProjections = new HashSet<>();
         private final Set<String> allFilters = new HashSet<>();
         private final Set<AggregationInfo> allAggregations = new HashSet<>();
@@ -86,7 +87,7 @@ public class QueryMetadataExtractor {
             }
         }
 
-        public MaterializedViewMetadata process(Query query) {
+        public QueryMetadata process(Query query) {
             Context context = new Context(query.getWith());
             process(query.getQueryBody(), context);
 

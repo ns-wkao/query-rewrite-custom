@@ -1,11 +1,10 @@
-package com.poc.rewrite.config;
+package com.poc.rewrite.model;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.ArrayList; // Import ArrayList
-import com.poc.rewrite.config.AggregationInfo;
 
-public class MaterializedViewMetadata {
+public class QueryMetadata {
     private String baseTable;
     private Optional<String> tableAlias = Optional.empty();
     private List<String> projectionColumns = new ArrayList<>();

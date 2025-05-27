@@ -33,15 +33,15 @@ public class SqlRewriteFileBasedTest {
     // Base directory within resources for all test case folders
     private static final String TEST_CASES_BASE_RESOURCE_DIR = "test_cases"; 
 
-    private SQLRewritePoc pocInstance;
+    private SQLRewriter pocInstance;
 
     @BeforeAll
     void initializePoc() {
-        logger.info("Initializing SQLRewritePoc for tests...");
-        PocConfig config = SQLRewritePoc.loadConfig("config.yaml");
+        logger.info("Initializing SQLRewriter for tests...");
+        PocConfig config = SQLRewriter.loadConfig("config.yaml");
         assertNotNull(config, "Failed to load PocConfig. Ensure config.yaml is in classpath.");
-        pocInstance = new SQLRewritePoc(config);
-        logger.info("SQLRewritePoc instance initialized.");
+        pocInstance = new SQLRewriter(config);
+        logger.info("SQLRewriter instance initialized.");
     }
 
     static Stream<Arguments> sqlFileProvider() throws IOException, URISyntaxException {
@@ -84,7 +84,7 @@ public class SqlRewriteFileBasedTest {
     @ParameterizedTest(name = "[{1}]") // Display test case name (directory name)
     @MethodSource("sqlFileProvider")
     void processSqlFile(Path querySqlFilePath, String testCaseName) {
-    assertNotNull(pocInstance, "SQLRewritePoc instance was not initialized.");
+    assertNotNull(pocInstance, "SQLRewriter instance was not initialized.");
 
     logger.info("--- Processing Test Case: {} ---", testCaseName);
 
