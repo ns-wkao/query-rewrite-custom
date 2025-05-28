@@ -1,8 +1,8 @@
-package com.poc.rewrite.config;
+package com.ns.rewrite.config;
 
 import java.util.Map;
 
-public class PocConfig {
+public class TableConfig {
     private Map<String, TableDefinition> tables;
     private Map<String, MaterializedViewDefinition> materializedViews;
 

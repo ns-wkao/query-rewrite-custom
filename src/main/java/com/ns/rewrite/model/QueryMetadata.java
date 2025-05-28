@@ -1,4 +1,4 @@
-package com.poc.rewrite.model;
+package com.ns.rewrite.model;
 
 import java.util.List;
 import java.util.Optional;

@@ -1,12 +1,12 @@
-package com.poc.rewrite.analysis;
-
-import com.poc.rewrite.model.AggregationInfo;
-import com.poc.rewrite.model.QueryMetadata;
+package com.ns.rewrite.analysis;
 
 import io.trino.sql.SqlFormatter;
 import io.trino.sql.tree.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.ns.rewrite.model.AggregationInfo;
+import com.ns.rewrite.model.QueryMetadata;
 
 import java.util.*;
 import java.util.stream.Collectors;

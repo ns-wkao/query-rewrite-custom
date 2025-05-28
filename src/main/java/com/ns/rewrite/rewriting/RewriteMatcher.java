@@ -1,10 +1,10 @@
-package com.poc.rewrite.rewriting;
-
-import com.poc.rewrite.model.AggregationInfo;
-import com.poc.rewrite.model.QueryMetadata;
+package com.ns.rewrite.rewriting;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.ns.rewrite.model.AggregationInfo;
+import com.ns.rewrite.model.QueryMetadata;
 
 import java.util.Collection;
 import java.util.HashSet;

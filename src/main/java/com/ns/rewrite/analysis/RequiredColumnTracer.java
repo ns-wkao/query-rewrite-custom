@@ -1,4 +1,4 @@
-package com.poc.rewrite.analysis;
+package com.ns.rewrite.analysis;
 
 import io.trino.sql.tree.*;
 import org.slf4j.Logger;

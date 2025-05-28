@@ -1,6 +1,5 @@
-package com.poc.rewrite;
+package com.ns.rewrite;
 
-import com.poc.rewrite.config.PocConfig;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.TestInstance;
@@ -9,6 +8,9 @@ import org.junit.jupiter.params.provider.Arguments; // Required for custom argum
 import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.ns.rewrite.SQLRewriter;
+import com.ns.rewrite.config.TableConfig;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -38,8 +40,8 @@ public class SqlRewriteFileBasedTest {
     @BeforeAll
     void initializePoc() {
         logger.info("Initializing SQLRewriter for tests...");
-        PocConfig config = SQLRewriter.loadConfig("config.yaml");
-        assertNotNull(config, "Failed to load PocConfig. Ensure config.yaml is in classpath.");
+        TableConfig config = SQLRewriter.loadConfig("config.yaml");
+        assertNotNull(config, "Failed to load TableConfig. Ensure config.yaml is in classpath.");
         pocInstance = new SQLRewriter(config);
         logger.info("SQLRewriter instance initialized.");
     }

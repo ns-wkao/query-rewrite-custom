@@ -1,4 +1,4 @@
-package com.poc.rewrite.rewriting;
+package com.ns.rewrite.rewriting;
 
 import io.trino.sql.tree.AliasedRelation;
 import io.trino.sql.tree.AstVisitor;

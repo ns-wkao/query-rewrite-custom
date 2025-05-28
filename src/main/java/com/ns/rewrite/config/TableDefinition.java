@@ -1,4 +1,4 @@
-package com.poc.rewrite.config;
+package com.ns.rewrite.config;
 
 import java.util.List;
 import java.util.Map;

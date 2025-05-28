@@ -1,13 +1,4 @@
-package com.poc.rewrite;
-
-import com.poc.rewrite.analysis.QueryMetadataExtractor;
-import com.poc.rewrite.analysis.RequiredColumnTracer;
-import com.poc.rewrite.config.MaterializedViewDefinition;
-import com.poc.rewrite.config.PocConfig;
-import com.poc.rewrite.config.TableDefinition;
-import com.poc.rewrite.model.QueryMetadata;
-import com.poc.rewrite.rewriting.RewriteMatcher;
-import com.poc.rewrite.rewriting.TableReplacerVisitor;
+package com.ns.rewrite;
 
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
@@ -19,13 +10,22 @@ import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 
+import com.ns.rewrite.analysis.QueryMetadataExtractor;
+import com.ns.rewrite.analysis.RequiredColumnTracer;
+import com.ns.rewrite.config.MaterializedViewDefinition;
+import com.ns.rewrite.config.TableConfig;
+import com.ns.rewrite.config.TableDefinition;
+import com.ns.rewrite.model.QueryMetadata;
+import com.ns.rewrite.rewriting.RewriteMatcher;
+import com.ns.rewrite.rewriting.TableReplacerVisitor;
+
 import java.io.InputStream;
 import java.util.*;
 
 public class SQLRewriter {
 
     private static final Logger logger = LoggerFactory.getLogger(SQLRewriter.class);
-    private final PocConfig pocConfig;
+    private final TableConfig tableConfig;
     private final SqlParser sqlParser;
     private final Map<String, QueryMetadata> mvMetadataMap = new HashMap<>();
     private final Set<String> knownBaseTables = new HashSet<>();
@@ -44,8 +44,8 @@ public class SQLRewriter {
         }
     }
 
-    public SQLRewriter(PocConfig config) {
-        this.pocConfig = Objects.requireNonNull(config, "PocConfig cannot be null");
+    public SQLRewriter(TableConfig config) {
+        this.tableConfig = Objects.requireNonNull(config, "TableConfig cannot be null");
         this.sqlParser = new SqlParser();
 
         // Store known base tables and their definitions
@@ -154,7 +154,7 @@ public class SQLRewriter {
 
             // Use QueryMatcher with refined (explicit) metadata
             if (RewriteMatcher.canSatisfy(refinedUserMeta, mvMeta)) {
-                MaterializedViewDefinition mvDef = pocConfig.getMaterializedViews().get(mvName);
+                MaterializedViewDefinition mvDef = tableConfig.getMaterializedViews().get(mvName);
                 if (mvDef != null) {
                     return new RewriteCandidate(mvName, mvDef.getTargetTable(), refinedUserMeta.getBaseTable());
                 } else {
@@ -189,10 +189,10 @@ public class SQLRewriter {
         return SqlFormatter.formatSql(rewrittenStatement);
     }
 
-    public static PocConfig loadConfig(String filename) {
+    public static TableConfig loadConfig(String filename) {
         LoaderOptions opts = new LoaderOptions();
         opts.setAllowDuplicateKeys(false);
-        Yaml yaml = new Yaml(new Constructor(PocConfig.class, opts));
+        Yaml yaml = new Yaml(new Constructor(TableConfig.class, opts));
         try (InputStream in = SQLRewriter.class.getClassLoader().getResourceAsStream(filename)) {
             if (in == null) {
                 throw new RuntimeException("Config file not found in classpath: " + filename);

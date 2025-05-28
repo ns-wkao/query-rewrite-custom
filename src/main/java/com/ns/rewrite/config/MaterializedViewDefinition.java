@@ -1,4 +1,4 @@
-package com.poc.rewrite.config;
+package com.ns.rewrite.config;
 
 public class MaterializedViewDefinition {
     private String definition;
