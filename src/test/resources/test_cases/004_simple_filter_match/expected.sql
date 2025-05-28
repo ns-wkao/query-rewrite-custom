@@ -3,7 +3,7 @@ SELECT
   alert_type,
   SUM("count")
 FROM
-  redshift_poc_iceberg.alert_event_daily_sum_detailed
+  redshift_poc_iceberg.alert_event_daily_sum
 WHERE
   (action = 'block')
 GROUP BY

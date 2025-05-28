@@ -34,6 +34,7 @@ materializedViews:
     definition: >
       SELECT
         date_trunc('day', timestamp)  AS timestamp,
+        action,
         ns_tenant_id,
         alert_type,
         SPLIT(organization_unit, '/') AS OU,
@@ -43,6 +44,7 @@ materializedViews:
         "redshift_poc_iceberg"."alert_v3"
       GROUP BY
         date_trunc('day', timestamp),
+        action,
         ns_tenant_id,
         alert_type,
         SPLIT(organization_unit, '/'),
@@ -64,6 +66,9 @@ materializedViews:
       FROM
         "redshift_poc_iceberg"."alert_v3"
       GROUP BY
+        policy,
+        action,
+        transaction_id,
         date_trunc('day', timestamp),
         ns_tenant_id,
         alert_type,
