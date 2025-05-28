@@ -11,7 +11,6 @@ import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 
 import com.ns.rewrite.analysis.QueryMetadataExtractor;
-import com.ns.rewrite.analysis.RequiredColumnTracer;
 import com.ns.rewrite.config.MaterializedViewDefinition;
 import com.ns.rewrite.config.TableConfig;
 import com.ns.rewrite.config.TableDefinition;
@@ -27,7 +26,7 @@ public class SQLRewriter {
     private static final Logger logger = LoggerFactory.getLogger(SQLRewriter.class);
     private final TableConfig tableConfig;
     private final SqlParser sqlParser;
-    private final Map<String, QueryMetadata> mvMetadataMap = new HashMap<>();
+    private final Map<String, QueryMetadata> mvMetadataMap = new LinkedHashMap<>();
     private final Set<String> knownBaseTables = new HashSet<>();
     private final Map<String, TableDefinition> tableDefinitions = new HashMap<>();
 
@@ -59,10 +58,8 @@ public class SQLRewriter {
                 try {
                     logger.info("Loading MV definition for '{}'", mvName);
                     Statement mvStmt = sqlParser.createStatement(def.getDefinition());
-                    // Extract MV metadata - ensure it *doesn't* use *
                     QueryMetadata metadata = QueryMetadataExtractor.extractMetadataFromQuery(mvStmt);
 
-                    // Validate: MVs should not use '*' (as per our plan)
                     if (metadata.getProjectionColumns().contains("*")) {
                         logger.error("MV '{}' uses '*' which is not allowed. Skipping.", mvName);
                         return;
@@ -76,7 +73,7 @@ public class SQLRewriter {
                 }
             });
         }
-        logger.info("Initialized with {} materialized views.", mvMetadataMap.size());
+        logger.info("Initialized with {} materialized views. Order: {}", mvMetadataMap.size(), mvMetadataMap.keySet());
     }
 
     public String processUserQuery(String sql) {
@@ -93,35 +90,13 @@ public class SQLRewriter {
             Query query = (Query) stmt;
 
             // 1. Extract initial metadata
-            QueryMetadata initialUserMeta = QueryMetadataExtractor.extractMetadataFromQuery(query);
-            logger.info("User query initial metadata extracted for base table: {}", initialUserMeta.getBaseTable());
+            QueryMetadata userMeta = QueryMetadataExtractor.extractMetadataFromQuery(query);
+            logger.info("User query initial metadata extracted for base table: {}", userMeta.getBaseTable());
 
-            // 2. Trace required columns
-            RequiredColumnTracer tracer = new RequiredColumnTracer(query, knownBaseTables);
-            Map<String, Set<String>> requiredColsMap = tracer.getRequiredBaseColumns();
+            // 2. Find a suitable MV candidate using metadata
+            RewriteCandidate candidate = findRewriteCandidate(userMeta);
 
-            // We only support single base table, so get its required columns.
-            // If the map is empty or has multiple entries, we can't handle it now.
-            if (requiredColsMap.size() != 1) {
-                logger.warn("Query tracer found {} base tables. Only single-table queries are supported for rewrite. No rewrite.", requiredColsMap.size());
-                return sql;
-            }
-            Set<String> requiredColumns = requiredColsMap.values().iterator().next();
-            logger.info("Traced required columns: {}", requiredColumns);
-
-            // 3. Create Refined Metadata
-            QueryMetadata refinedUserMeta = new QueryMetadata();
-            refinedUserMeta.setBaseTable(initialUserMeta.getBaseTable());
-            refinedUserMeta.setTableAlias(initialUserMeta.getTableAlias());
-            refinedUserMeta.setFilterColumns(initialUserMeta.getFilterColumns());
-            refinedUserMeta.setAggregations(initialUserMeta.getAggregations());
-            refinedUserMeta.setGroupByColumns(initialUserMeta.getGroupByColumns());
-            refinedUserMeta.setProjectionColumns(new ArrayList<>(requiredColumns)); // Use traced columns
-
-            // 4. Find a suitable MV candidate using refined metadata
-            RewriteCandidate candidate = findRewriteCandidate(refinedUserMeta);
-
-            // 5. Perform rewrite if a candidate is found
+            // 3. Perform rewrite if a candidate is found
             if (candidate != null) {
                 logger.info("Found suitable MV '{}'. Rewriting query.", candidate.mvName);
                 return rewriteAst(stmt, candidate.baseTableToReplace, candidate.mvTargetTable);
@@ -142,23 +117,32 @@ public class SQLRewriter {
         }
     }
 
+
     /**
-     * Finds a candidate using the *refined* user metadata.
+     * Finds a candidate using the full user metadata.
      */
-    private RewriteCandidate findRewriteCandidate(QueryMetadata refinedUserMeta) {
+    private RewriteCandidate findRewriteCandidate(QueryMetadata userMeta) {
         for (Map.Entry<String, QueryMetadata> entry : mvMetadataMap.entrySet()) {
             String mvName = entry.getKey();
             QueryMetadata mvMeta = entry.getValue();
 
-            logger.info("Checking MV '{}' against refined user query...", mvName);
+            logger.info("Checking MV '{}' against user query...", mvName);
 
-            // Use QueryMatcher with refined (explicit) metadata
-            if (RewriteMatcher.canSatisfy(refinedUserMeta, mvMeta)) {
+            // Use QueryMatcher with full metadata
+            RewriteMatcher.MatchResult result = RewriteMatcher.canSatisfy(userMeta, mvMeta);
+
+            if (result.canSatisfy) {
                 MaterializedViewDefinition mvDef = tableConfig.getMaterializedViews().get(mvName);
                 if (mvDef != null) {
-                    return new RewriteCandidate(mvName, mvDef.getTargetTable(), refinedUserMeta.getBaseTable());
+                    return new RewriteCandidate(mvName, mvDef.getTargetTable(), userMeta.getBaseTable());
                 } else {
                     logger.error("Internal error: Found matching MV '{}' but couldn't find its definition.", mvName);
+                }
+            } else {
+                // Log the detailed reasons for the mismatch.
+                logger.info("--> MV '{}' does not match. Reasons:", mvName);
+                for (String reason : result.mismatchReasons) {
+                    logger.info("    - {}", reason);
                 }
             }
         }
@@ -171,7 +155,6 @@ public class SQLRewriter {
         if (parts.length == 1) {
             targetQualifiedName = QualifiedName.of(parts[0]);
         } else {
-            // For multiple parts, use the varargs version: of(first, rest...)
             String first = parts[0];
             String[] rest = new String[parts.length - 1];
             System.arraycopy(parts, 1, rest, 0, parts.length - 1);

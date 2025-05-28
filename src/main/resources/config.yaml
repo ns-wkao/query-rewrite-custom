@@ -48,3 +48,25 @@ materializedViews:
         SPLIT(organization_unit, '/'),
         CONCAT(app, instance_id)
     targetTable: redshift_poc_iceberg.alert_event_daily_sum
+
+  MV_ALERT_EVENT_DAILY_AGG_DETAILED:
+    definition: >
+      SELECT
+        policy,
+        action,
+        transaction_id,
+        date_trunc('day', timestamp)  AS timestamp,
+        ns_tenant_id,
+        alert_type,
+        SPLIT(organization_unit, '/') AS OU,
+        CONCAT(app, instance_id) AS ns_app_instance,
+        SUM("count")   AS count
+      FROM
+        "redshift_poc_iceberg"."alert_v3"
+      GROUP BY
+        date_trunc('day', timestamp),
+        ns_tenant_id,
+        alert_type,
+        SPLIT(organization_unit, '/'),
+        CONCAT(app, instance_id)
+    targetTable: redshift_poc_iceberg.alert_event_daily_sum_detailed

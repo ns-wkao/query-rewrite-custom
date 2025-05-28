@@ -12,7 +12,7 @@ WITH
           SPLIT(A.organization_unit, '/') OU,
           CONCAT(A.app, A.instance_id) ns_app_instance
         FROM
-          redshift_poc_iceberg.alert_event_daily_sum A
+          redshift_poc_iceberg.alert_event_daily_sum_detailed A
         WHERE
           (
             (A.ns_tenant_id = 2683)

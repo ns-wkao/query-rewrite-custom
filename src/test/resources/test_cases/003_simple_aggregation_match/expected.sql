@@ -1,3 +1,3 @@
 SELECT ns_tenant_id, alert_type, SUM("count")
-FROM redshift_poc_iceberg.alert_event_daily_sum
+FROM poc_mvs.mv_simple_agg
 GROUP BY ns_tenant_id, alert_type

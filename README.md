@@ -24,8 +24,6 @@ The rewriting process follows these steps:
 2.  **User Query Processing**:
     * Parses the incoming user SQL query into an AST.
     * Extracts initial metadata from the user query.
-    * **Traces Required Columns**: This is a critical step. It uses `RequiredColumnTracer` to analyze the query, including Common Table Expressions (CTEs), to determine the *exact* set of columns needed from the underlying base table. This avoids issues with `*` in intermediate steps and ensures we know the true requirements.
-    * Creates *refined* user query metadata using the traced columns.
 
 3.  **Candidate Selection**:
     * Uses `RewriteMatcher` to compare the *refined* user query metadata against all loaded MV metadata.
@@ -51,7 +49,6 @@ The rewriting process follows these steps:
 * **`model/`**: Data classes representing query metadata (`QueryMetadata`, `AggregationInfo`).
 * **`analysis/`**:
     * `QueryMetadataExtractor.java`: Parses SQL and extracts high-level metadata.
-    * `RequiredColumnTracer.java`: Determines the *actual* base columns needed by a query.
 * **`rewriting/`**:
     * `RewriteMatcher.java`: Decides if an MV can satisfy a query.
     * `TableReplacerVisitor.java`: Modifies the SQL AST to perform the table swap.

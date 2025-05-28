@@ -17,6 +17,7 @@ import java.util.stream.Stream;
  * It uses a visitor pattern to traverse the query structure and now extracts
  * aggregations into structured AggregationInfo objects.
  * It also handles GROUP BY ordinals by resolving them against the SELECT list.
+ * It now attempts to resolve projections/group-bys to their base columns.
  */
 public class QueryMetadataExtractor {
 
@@ -60,11 +61,69 @@ public class QueryMetadataExtractor {
                 metadata.getTableAlias().orElse("N/A"),
                 metadata.getProjectionColumns(),
                 metadata.getGroupByColumns(),
-                metadata.getAggregations().stream().map(AggregationInfo::toString).collect(Collectors.toList()), // Log as string
+                metadata.getAggregations().stream().map(AggregationInfo::toString).collect(Collectors.toList()),
                 metadata.getFilterColumns());
 
         return metadata;
     }
+
+    /**
+     * Finds all base identifiers (potential column names) within an Expression,
+     * traversing through functions and aliases.
+     */
+    private static Set<String> findBaseIdentifiers(Expression expression, Optional<String> aliasToStrip) {
+        Set<String> identifiers = new HashSet<>();
+        
+        // Apply alias stripping first if an alias exists
+        Expression processedExpr = aliasToStrip.map(alias -> 
+            ExpressionTreeRewriter.rewriteWith(new AliasStripper(alias), expression))
+            .orElse(expression);
+
+        new DefaultTraversalVisitor<Void>() {
+            @Override
+            protected Void visitIdentifier(Identifier node, Void context) {
+                identifiers.add(node.getValue().toLowerCase());
+                return null;
+            }
+
+            @Override
+            protected Void visitDereferenceExpression(DereferenceExpression node, Void context) {
+                // If the base is an Identifier, we assume it's a table/alias and only take the field.
+                // If the base is complex (like a function), we process it.
+                // This aims to get only the column name at the end.
+                if (node.getField().isPresent()) {
+                    identifiers.add(node.getField().get().getValue().toLowerCase());
+                    // Only recurse if base is *not* a simple identifier.
+                    if (!(node.getBase() instanceof Identifier)) {
+                        process(node.getBase(), context);
+                    }
+                } else {
+                    // Should not happen often, but traverse base if no field.
+                    process(node.getBase(), context);
+                }
+                return null; // Stop default traversal down this path
+            }
+
+            @Override
+            protected Void visitFunctionCall(FunctionCall node, Void context) {
+                 // Recurse into arguments.
+                 node.getArguments().forEach(arg -> process(arg, context));
+                 return null;
+            }
+            
+            // Handle * in COUNT(*) - add * so it can be handled/ignored later.
+            @Override
+            protected Void visitAllColumns(AllColumns node, Void context) {
+                identifiers.add("*");
+                return null;
+            }
+
+        }.process(processedExpr, null);
+
+        logger.trace("Found base identifiers for '{}': {}", SqlFormatter.formatSql(expression), identifiers);
+        return identifiers;
+    }
+
 
     /**
      * The main AST visitor for extracting query metadata.
@@ -77,29 +136,45 @@ public class QueryMetadataExtractor {
         private final Set<AggregationInfo> allAggregations = new HashSet<>();
         private final Set<String> allGroupBys = new HashSet<>();
         private RelationInfo baseRelationInfo = null;
-        private boolean processedMainQuerySpec = false;
+        // Keep track of visited CTEs during base table search to avoid loops
+        private final Set<String> visitedCtesInSearch = new HashSet<>();
+        private final Map<String, WithQuery> cteMap = new HashMap<>();
 
         static class Context {
             final Optional<With> withClause;
+            final Map<String, WithQuery> cteMap; // Pass CTE map in context
 
             Context(Optional<With> withClause) {
                 this.withClause = withClause;
+                this.cteMap = new HashMap<>();
+                withClause.ifPresent(w -> w.getQueries().forEach(q -> this.cteMap.put(q.getName().getValue().toLowerCase(), q)));
+            }
+             Context(Optional<With> withClause, Map<String, WithQuery> cteMap) {
+                this.withClause = withClause;
+                this.cteMap = cteMap;
             }
         }
 
         public QueryMetadata process(Query query) {
             Context context = new Context(query.getWith());
-            process(query.getQueryBody(), context);
-
+            
+            // Find base table first
+            baseRelationInfo = findBaseTableRecursive(query.getQueryBody(), context);
             if (baseRelationInfo == null) {
-                findAnyTable(query.getQueryBody());
-                if(baseRelationInfo == null){
-                     throw new IllegalStateException("Could not determine base table for the query.");
-                }
+                throw new IllegalStateException("Could not determine base table for the query.");
             }
+
+            // Now, traverse the *whole* tree again to collect *all* columns/aggs/filters.
+            process(query.getQueryBody(), context);
 
             metadata.setBaseTable(baseRelationInfo.baseTableName);
             metadata.setTableAlias(baseRelationInfo.alias);
+            
+            // Remove '*' for now
+            allProjections.remove("*");
+            // Post-process: Remove table alias if present.
+            baseRelationInfo.alias.ifPresent(a -> allProjections.remove(a.toLowerCase()));
+
             metadata.setProjectionColumns(new ArrayList<>(allProjections));
             metadata.setFilterColumns(new ArrayList<>(allFilters));
             metadata.setAggregations(new ArrayList<>(allAggregations));
@@ -108,162 +183,126 @@ public class QueryMetadataExtractor {
             return metadata;
         }
 
-        private void findAnyTable(Node node) {
-            new DefaultTraversalVisitor<Void>() {
-                @Override
-                protected Void visitTable(Table tableNode, Void context) {
-                    if (baseRelationInfo == null) {
-                        baseRelationInfo = new RelationInfo(tableNode.getName().toString(), Optional.empty());
-                    }
-                    return null;
+        private RelationInfo findBaseTableRecursive(Node node, Context context) {
+            if (node instanceof Table) {
+                Table table = (Table) node;
+                String tableName = table.getName().toString().toLowerCase();
+                if (!context.cteMap.containsKey(tableName)) {
+                    return new RelationInfo(table.getName().toString(), Optional.empty());
+                } else if (!visitedCtesInSearch.contains(tableName)) {
+                    visitedCtesInSearch.add(tableName); // Mark as visited
+                    return findBaseTableRecursive(context.cteMap.get(tableName).getQuery().getQueryBody(), context);
                 }
-            }.process(node, null);
+            } else if (node instanceof AliasedRelation) {
+                AliasedRelation ar = (AliasedRelation) node;
+                RelationInfo base = findBaseTableRecursive(ar.getRelation(), context);
+                if (base != null) {
+                    return new RelationInfo(base.baseTableName, Optional.of(ar.getAlias().getValue()));
+                }
+            } else if (node instanceof TableSubquery) {
+                return findBaseTableRecursive(((TableSubquery) node).getQuery().getQueryBody(), context);
+            } else if (node instanceof QuerySpecification) {
+                return ((QuerySpecification) node).getFrom()
+                           .map(from -> findBaseTableRecursive(from, context))
+                           .orElse(null);
+            } else if (node instanceof Join) {
+                RelationInfo left = findBaseTableRecursive(((Join) node).getLeft(), context);
+                return (left != null) ? left : findBaseTableRecursive(((Join) node).getRight(), context);
+            }
+            return null;
         }
 
         @Override
         protected Void visitQuerySpecification(QuerySpecification node, Context context) {
-            if (processedMainQuerySpec) {
-                return null;
+            Optional<String> alias = node.getFrom()
+                                         .filter(AliasedRelation.class::isInstance)
+                                         .map(AliasedRelation.class::cast)
+                                         .map(ar -> Optional.of(ar.getAlias().getValue()))
+                                         .orElse(baseRelationInfo != null ? baseRelationInfo.alias : Optional.empty());
+
+            // Extract from ALL levels
+            allProjections.addAll(extractProjections(node, alias));
+            allFilters.addAll(extractFilterColumns(node, alias));
+            allAggregations.addAll(extractAggregations(node, alias));
+            allGroupBys.addAll(extractGroupBy(node, alias));
+
+            // Continue traversal into FROM
+            node.getFrom().ifPresent(from -> process(from, context));
+            return null;
+        }
+        
+        @Override
+        protected Void visitTable(Table node, Context context) {
+            String tableName = node.getName().toString().toLowerCase();
+            // If it's a CTE, traverse into it
+            if (context.cteMap.containsKey(tableName)) {
+                logger.trace("Traversing into CTE: {}", tableName);
+                process(context.cteMap.get(tableName).getQuery().getQueryBody(), context);
             }
-
-            RelationInfo currentRelationInfo = node.getFrom()
-                    .map(from -> findRelationInfoRecursive(from, context))
-                    .orElse(null);
-
-            if (currentRelationInfo != null && baseRelationInfo == null) {
-                baseRelationInfo = currentRelationInfo;
-                allProjections.addAll(extractProjections(node, baseRelationInfo.alias));
-                allFilters.addAll(extractFilterColumns(node, baseRelationInfo.alias));
-                allAggregations.addAll(extractAggregations(node, baseRelationInfo.alias));
-                // *** Pass the full QuerySpecification to extractGroupBy ***
-                allGroupBys.addAll(extractGroupBy(node, baseRelationInfo.alias));
-                processedMainQuerySpec = true;
-            } else if (currentRelationInfo != null) {
-                logger.debug("Skipping metadata extraction from nested QuerySpecification based on: {}", currentRelationInfo);
-            } else if (baseRelationInfo == null) {
-                 logger.warn("QuerySpecification without FROM clause encountered, base table might be missed.");
-            }
-
             return null;
         }
 
         @Override
-        protected Void visitSetOperation(SetOperation node, Context context) {
-            logger.warn("Encountered SetOperation (e.g., UNION). Processing only the first relation for metadata extraction.");
-            process(node.getRelations().get(0), context);
-            return null;
+        protected Void visitTableSubquery(TableSubquery node, Context context) {
+            return process(node.getQuery().getQueryBody(), context);
         }
 
         @Override
-        protected Void visitWith(With node, Context context) {
-            return super.visitWith(node, context);
+        protected Void visitAliasedRelation(AliasedRelation node, Context context) {
+             return process(node.getRelation(), context);
         }
 
-        private RelationInfo findRelationInfoRecursive(Relation node, Context context) {
-             if (node instanceof Table) {
-                Table table = (Table) node;
-                String tableName = table.getName().toString();
-                if (context.withClause.isPresent()) {
-                    for (WithQuery cte : context.withClause.get().getQueries()) {
-                        if (cte.getName().getValue().equalsIgnoreCase(tableName)) {
-                            logger.debug("Tracing into CTE: {}", tableName);
-                            MetadataVisitor subVisitor = new MetadataVisitor();
-                            subVisitor.process(cte.getQuery().getQueryBody(), context);
-                            return subVisitor.baseRelationInfo;
-                        }
-                    }
-                }
-                return new RelationInfo(tableName, Optional.empty());
-            } else if (node instanceof AliasedRelation) {
-                AliasedRelation ar = (AliasedRelation) node;
-                RelationInfo base = findRelationInfoRecursive(ar.getRelation(), context);
-                return new RelationInfo(base.baseTableName, Optional.of(ar.getAlias().getValue()));
-            } else if (node instanceof TableSubquery) {
-                logger.debug("Tracing into TableSubquery.");
-                MetadataVisitor subVisitor = new MetadataVisitor();
-                subVisitor.process(((TableSubquery) node).getQuery().getQueryBody(), context);
-                return subVisitor.baseRelationInfo;
-            } else if (node instanceof Join) {
-                logger.warn("JOIN encountered; defaulting to left relation for base table.");
-                return findRelationInfoRecursive(((Join) node).getLeft(), context);
-            }
-            throw new IllegalArgumentException("Unsupported relation type: " + node.getClass().getSimpleName());
+        @Override
+        protected Void visitJoin(Join node, Context context) {
+             process(node.getLeft(), context);
+             process(node.getRight(), context);
+             return null;
         }
 
-        /**
-         * Formats an expression to its SQL string representation.
-         */
         private String formatExpr(Expression expr) {
             return SqlFormatter.formatSql(expr);
         }
 
-        private List<String> extractProjections(QuerySpecification spec, Optional<String> alias) {
-            List<String> cols = new ArrayList<>();
+        /**
+         * Extracts base columns used in projections.
+         */
+        private Set<String> extractProjections(QuerySpecification spec, Optional<String> alias) {
+            Set<String> cols = new HashSet<>();
             for (SelectItem item : spec.getSelect().getSelectItems()) {
                 if (item instanceof SingleColumn) {
-                    SingleColumn sc = (SingleColumn) item;
-                    Expression norm = normalizeExpression(sc.getExpression(), alias);
-                    cols.add(sc.getAlias().map(Identifier::getValue).orElse(formatExpr(norm)));
+                    cols.addAll(findBaseIdentifiers(((SingleColumn) item).getExpression(), alias));
                 } else if (item instanceof AllColumns) {
                     cols.add("*");
-                } else {
-                   logger.warn("Unsupported projection type: {}", item.getClass().getSimpleName());
-                   cols.add(item.toString());
                 }
             }
             return cols;
         }
 
        /**
-         * Extracts GROUP BY columns, resolving ordinals.
-         *
-         * @param spec The QuerySpecification.
-         * @param alias The table alias.
-         * @return A list of GROUP BY column/expression strings.
+         * Extracts base columns used in GROUP BY, resolving ordinals.
          */
-       private List<String> extractGroupBy(QuerySpecification spec, Optional<String> alias) {
-            // Get the list of SelectItems to resolve ordinals
+       private Set<String> extractGroupBy(QuerySpecification spec, Optional<String> alias) {
             List<SelectItem> selectItems = spec.getSelect().getSelectItems();
+            Set<String> groupBys = new HashSet<>();
 
-            return spec.getGroupBy().stream()
+            spec.getGroupBy().stream()
                     .flatMap(gb -> gb.getGroupingElements().stream())
-                    .flatMap(ge -> {
-                        if (ge instanceof SimpleGroupBy) {
-                            return ((SimpleGroupBy) ge).getExpressions().stream();
-                        } else {
-                            logger.warn("Unsupported GroupingElement: {}", ge.getClass().getSimpleName());
-                            return Stream.empty();
-                        }
-                    })
+                    .flatMap(ge -> (ge instanceof SimpleGroupBy) ? ((SimpleGroupBy) ge).getExpressions().stream() : Stream.empty())
                     .map(expr -> {
-                        // Check if it's an ordinal (LongLiteral)
+                        Expression resolvedExpr = expr;
                         if (expr instanceof LongLiteral) {
                             long ordinal = Long.parseLong(((LongLiteral) expr).getValue());
-                            int index = (int) ordinal - 1; // Convert 1-based to 0-based
-
-                            // Map to SelectItem and extract expression
-                            if (index >= 0 && index < selectItems.size()) {
-                                SelectItem item = selectItems.get(index);
-                                if (item instanceof SingleColumn) {
-                                    // Use the expression from the SELECT list
-                                    logger.debug("Resolved GROUP BY ordinal {} to: {}", ordinal, ((SingleColumn) item).getExpression());
-                                    return normalizeExpression(((SingleColumn) item).getExpression(), alias);
-                                } else {
-                                    logger.warn("GROUP BY ordinal {} refers to non-SingleColumn item: {}", ordinal, item);
-                                    return expr; // Fallback: return the literal
-                                }
+                            int index = (int) ordinal - 1;
+                            if (index >= 0 && index < selectItems.size() && selectItems.get(index) instanceof SingleColumn) {
+                                resolvedExpr = ((SingleColumn) selectItems.get(index)).getExpression();
                             } else {
-                                logger.warn("GROUP BY ordinal {} is out of bounds (Select list size: {}).", ordinal, selectItems.size());
-                                return expr; // Fallback: return the literal
+                                logger.warn("GROUP BY ordinal {} is out of bounds or not a SingleColumn.", ordinal);
                             }
-                        } else {
-                            // It's not an ordinal, process as before
-                            return normalizeExpression(expr, alias);
                         }
+                        return resolvedExpr;
                     })
-                    // Format the (resolved) expression to string
-                    .map(this::formatExpr)
-                    .collect(Collectors.toList());
+                    .forEach(expr -> groupBys.addAll(findBaseIdentifiers(expr, alias))); // Use findBaseIdentifiers
+            return groupBys;
         }
 
         /**
@@ -291,50 +330,34 @@ public class QueryMetadataExtractor {
                     Set<String> agNames = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
 
                     if (agNames.contains(name)) {
-                        // Extract arguments as strings
                         List<String> args = fc.getArguments().stream()
-                                .map(a -> normalizeExpression(a, alias))
-                                .map(QueryMetadataExtractor.MetadataVisitor.this::formatExpr)
+                                // Find base identifiers for each argument
+                                .flatMap(a -> findBaseIdentifiers(a, alias).stream())
                                 .collect(Collectors.toList());
-
-                        // Create and add AggregationInfo
+                        
+                        // Use the normalized arguments for AggregationInfo
                         AggregationInfo aggInfo = new AggregationInfo(
                                 fc.getName().toString(),
                                 args,
                                 fc.isDistinct()
                         );
                         collector.add(aggInfo);
-                        return null; // Stop recursion here
+                        return null; // Stop recursion here for this aggregation
                     } else {
-                         return super.visitFunctionCall(fc, context); // Recurse
+                         // Recurse into arguments if not an aggregation
+                         return super.visitFunctionCall(fc, context);
                     }
                 }
             }.process(expr, null);
         }
 
-
-       private List<String> extractFilterColumns(QuerySpecification spec, Optional<String> alias) {
+        /**
+         * Extracts base columns used in filter (WHERE) clauses.
+         */
+       private Set<String> extractFilterColumns(QuerySpecification spec, Optional<String> alias) {
             Set<String> cols = new HashSet<>();
-            spec.getWhere().ifPresent(where -> {
-                new DefaultTraversalVisitor<Void>() {
-                    @Override
-                    protected Void visitIdentifier(Identifier id, Void ctx) {
-                        cols.add(formatExpr(normalizeExpression(id, alias)));
-                        return null;
-                    }
-                    @Override
-                    protected Void visitDereferenceExpression(DereferenceExpression d, Void ctx) {
-                        cols.add(formatExpr(normalizeExpression(d, alias)));
-                        return null;
-                    }
-                    @Override
-                    protected Void visitFunctionCall(FunctionCall node, Void context) {
-                         node.getArguments().forEach(arg -> process(arg, context));
-                         return null;
-                    }
-                }.process(where, null);
-            });
-            return new ArrayList<>(cols);
+            spec.getWhere().ifPresent(where -> cols.addAll(findBaseIdentifiers(where, alias)));
+            return cols;
         }
 
 
