@@ -12,6 +12,7 @@ tables:
       - count: INTEGER
       - ur_normalized: VARCHAR
       - alert_type: VARCHAR
+      - malware_name: VARCHAR
       - ns_tenant_id: INTEGER
       - ns_creation_timestamp: TIMESTAMP
       - signature_id: INTEGER
