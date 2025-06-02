@@ -61,9 +61,12 @@ materializedViews:
         date_trunc('day', timestamp)  AS timestamp,
         ns_tenant_id,
         alert_type,
-        SPLIT(organization_unit, '/') AS OU,
-        CONCAT(app, instance_id) AS ns_app_instance,
-        SUM("count")   AS count
+        organization_unit,
+        app,
+        instance_id
+        SUM("count") AS count,
+        SUM(numbytes) AS numbytes,
+        SUM(file_size) AS file_size
       FROM
         "redshift_poc_iceberg"."alert_v3"
       GROUP BY
@@ -73,6 +76,7 @@ materializedViews:
         date_trunc('day', timestamp),
         ns_tenant_id,
         alert_type,
-        SPLIT(organization_unit, '/'),
-        CONCAT(app, instance_id)
+        organization_unit,
+        app,
+        instance_id
     targetTable: redshift_poc_iceberg.alert_event_daily_sum_detailed
