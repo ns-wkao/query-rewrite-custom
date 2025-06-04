@@ -6,28 +6,17 @@ import org.slf4j.LoggerFactory;
 import com.ns.rewrite.config.TableDefinition;
 import com.ns.rewrite.model.AggregationInfo;
 import com.ns.rewrite.model.QueryMetadata;
-import com.ns.rewrite.config.TableDefinition;
 import com.ns.rewrite.config.ColumnDefinition;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Provides logic to determine if a Materialized View can satisfy a given user query.
- * Uses structured AggregationInfo for matching and assumes explicit column lists.
+ * Determines if a Materialized View can satisfy a given user query.
  */
 public class RewriteMatcher {
-
     private static final Logger logger = LoggerFactory.getLogger(RewriteMatcher.class);
 
-    /**
-     * Helper class to hold the result of a match attempt.
-     */
     public static class MatchResult {
         public final boolean canSatisfy;
         public final List<String> mismatchReasons;
@@ -46,169 +35,172 @@ public class RewriteMatcher {
         }
     }
 
-
-    /**
-     * Strips qualifiers (optional) and lowercases column names for comparison.
-     * Keeps it simple for now, mainly lowercasing and basic quote removal.
-     *
-     * @param cols List of column/expression strings.
-     * @return A Set of normalized strings.
-     */
-    private static Set<String> normalizeColumns(Collection<String> cols) {
-        if (cols == null) {
-            return new HashSet<>();
-        }
-        return cols.stream()
-                .map(c -> {
-                    // Only strip qualifier if a dot exists AND it's not part of a function call
-                    int dot = c.lastIndexOf('.');
-                    return (dot >= 0 && !c.contains("(")) ? c.substring(dot + 1) : c;
-                })
-                .map(c -> c.replace("\"", "")) // Remove quotes
-                .map(String::toLowerCase)       // Convert to lowercase
-                .collect(Collectors.toSet());
-    }
-
     /**
      * Determines if a materialized view can satisfy the user query.
-     *
-     * @param userMetadata Metadata from the user query (refined, explicit columns).
-     * @param mvMetadata   Metadata from the materialized view (explicit columns).
-     * @return A MatchResult object indicating success or failure with reasons.
      */
     public static MatchResult canSatisfy(QueryMetadata userMetadata, 
                                          QueryMetadata mvMetadata,
-                                         String actualUserQueryTableToReplace, 
+                                         String targetTableName, 
                                          TableDefinition originalTableSchema) {
-        List<String> reasons = new ArrayList<>();
-
-        // 1. Base table consistency check: MV's base must be the table we're trying to replace.
-        // Should be already filtered by SQLRewriter
-        if (!mvMetadata.getBaseTable().equalsIgnoreCase(actualUserQueryTableToReplace)) {
-            reasons.add(String.format("MV base table '%s' does not match the target user query table '%s' for replacement.",
-                    mvMetadata.getBaseTable(), actualUserQueryTableToReplace));
-            logger.debug("MV base table mismatch: mv='{}', target_user_table='{}'",
-                    mvMetadata.getBaseTable(), actualUserQueryTableToReplace);
-            return MatchResult.failure(reasons); // Fail fast
-        }
-        logger.debug("MV '{}' is based on table '{}', which matches user query table being considered for replacement.", mvMetadata.getBaseTable(), actualUserQueryTableToReplace);
-
-
-        // Use Sets for efficient comparison (relies on AggregationInfo.equals/hashCode)
-        Set<AggregationInfo> userAggs = new HashSet<>(userMetadata.getAggregations());
-        Set<AggregationInfo> mvAggs = new HashSet<>(mvMetadata.getAggregations());
-
-        Set<String> userGbs = normalizeColumns(userMetadata.getGroupByColumns());
-        Set<String> mvGbs = normalizeColumns(mvMetadata.getGroupByColumns());
-
-        // User query's filters and projections are global for the entire query
-        Set<String> userNeededFilterColumns = normalizeColumns(userMetadata.getFilterColumns());
-        Set<String> userNeededProjectionColumns = normalizeColumns(userMetadata.getProjectionColumns());
         
-        logger.debug("User query needs filter columns (normalized): {}", userNeededFilterColumns);
-        logger.debug("User query needs projection columns (normalized): {}", userNeededProjectionColumns);
+        MatchValidator validator = new MatchValidator(userMetadata, mvMetadata, targetTableName, originalTableSchema);
+        return validator.validate();
+    }
 
-        // Get normalized columns from the materialize view
-        Set<String> mvAvailableNormalizedColumns = new HashSet<>();
-        mvAvailableNormalizedColumns.addAll(normalizeColumns(mvMetadata.getProjectionColumns()));
-        mvAvailableNormalizedColumns.addAll(normalizeColumns(mvMetadata.getGroupByColumns()));
-        logger.debug("MV '{}' offers available columns (normalized projections + groupBys): {}", mvMetadata.getBaseTable(), mvAvailableNormalizedColumns);
+    /**
+     * Internal class to handle the validation logic with cleaner separation of concerns.
+     */
+    private static class MatchValidator {
+        private final QueryMetadata userMetadata;
+        private final QueryMetadata mvMetadata;
+        private final String targetTableName;
+        private final TableDefinition originalTableSchema;
+        private final List<String> failures = new ArrayList<>();
+        
+        // Normalized sets for efficient comparison
+        private final Set<String> userGroupBys;
+        private final Set<String> mvGroupBys;
+        private final Set<AggregationInfo> userAggs;
+        private final Set<AggregationInfo> mvAggs;
+        private final Set<String> userNeededColumns;
+        private final Set<String> mvAvailableColumns;
+        private final Set<String> originalTableColumns;
 
+        MatchValidator(QueryMetadata userMetadata, QueryMetadata mvMetadata, 
+                      String targetTableName, TableDefinition originalTableSchema) {
+            this.userMetadata = userMetadata;
+            this.mvMetadata = mvMetadata;
+            this.targetTableName = targetTableName;
+            this.originalTableSchema = originalTableSchema;
+            
+            // Pre-compute normalized sets
+            this.userGroupBys = normalizeColumns(userMetadata.getGroupByColumns());
+            this.mvGroupBys = normalizeColumns(mvMetadata.getGroupByColumns());
+            this.userAggs = new HashSet<>(userMetadata.getAggregations());
+            this.mvAggs = new HashSet<>(mvMetadata.getAggregations());
+            
+            this.userNeededColumns = combineColumns(
+                userMetadata.getFilterColumns(), 
+                userMetadata.getProjectionColumns()
+            );
+            this.mvAvailableColumns = combineColumns(
+                mvMetadata.getProjectionColumns(), 
+                mvMetadata.getGroupByColumns()
+            );
+            this.originalTableColumns = extractOriginalTableColumns();
+        }
 
-        // 2. GROUP BY: MV must contain *at least* all user GROUP BY columns that orignated from the table being replaced.
-        //    Simplification: if a GB column isn't in MV, check if it belonged to the original table.
-        //    If it belonged elsewhere, it's not MV's fault. If it belonged to original table, it's a miss.
-        Set<String> missingGbs = new HashSet<>();
-        for (String userGbCol : userGbs) {
-            if (!mvGbs.contains(userGbCol)) {
-                // Check if this group-by column was part of the originalTableSchema
-                boolean wasInOriginalTable = false;
-                if (originalTableSchema != null && originalTableSchema.getParsedSchema() != null) {
-                    for (ColumnDefinition colDef : originalTableSchema.getParsedSchema()) {
-                        if (normalizeColumns(Collections.singletonList(colDef.getName())).contains(userGbCol)) {
-                            wasInOriginalTable = true;
-                            break;
-                        }
-                    }
-                }
-                if (wasInOriginalTable) { // Only a problem if the original table was supposed to provide it
-                    missingGbs.add(userGbCol);
-                }
+        MatchResult validate() {
+            if (!validateBaseTable()) {
+                return MatchResult.failure(failures);
+            }
+            
+            validateGroupByColumns();
+            validateAggregations();
+            validateColumnAvailability();
+            
+            if (failures.isEmpty()) {
+                logger.info("MV '{}' can satisfy user query for table '{}'", 
+                    mvMetadata.getBaseTable(), targetTableName);
+                return MatchResult.success();
+            } else {
+                logger.info("MV '{}' cannot satisfy query for table '{}': {}", 
+                    mvMetadata.getBaseTable(), targetTableName, String.join("; ", failures));
+                return MatchResult.failure(failures);
             }
         }
-        if (!missingGbs.isEmpty()) {
-            reasons.add(String.format("Group-by mismatch for table '%s'. MV needs to provide these missing group-by columns: %s. (MV has: %s, User query needs: %s)",
-                    actualUserQueryTableToReplace, missingGbs, mvGbs, userGbs));
+
+        private boolean validateBaseTable() {
+            if (!mvMetadata.getBaseTable().equalsIgnoreCase(targetTableName)) {
+                failures.add(String.format("MV base table '%s' does not match target table '%s'",
+                    mvMetadata.getBaseTable(), targetTableName));
+                return false;
+            }
+            return true;
         }
 
-        // 3. Aggregations: MV must provide *at least* all user aggregation expressions
-        //    that involve columns from the table being replaced.
-        //    Simplification: The AggregationInfo normalizes column names. If an agg uses a column
-        //    from originalTableSchema and that agg isn't in mvAggs, it's a problem.
-        //    This is hard to check precisely without knowing source of each arg in AggInfo.
-        //    Current AggInfo normalizes to base column name. Assume if user agg is not in MV, it's missing.
-        //    This part might need refinement if an aggregation is purely on other tables.
-        //    For now, keeping original logic: MV must have all user aggs.
-        Set<AggregationInfo> missingAggs = userAggs.stream()
-                .filter(uAgg -> !mvAggs.contains(uAgg))
+        private void validateGroupByColumns() {
+            Set<String> missingGroupBys = findMissingColumns(userGroupBys, mvGroupBys, originalTableColumns);
+            if (!missingGroupBys.isEmpty()) {
+                failures.add(String.format("Missing GROUP BY columns: %s", missingGroupBys));
+            }
+        }
+
+        private void validateAggregations() {
+            Set<AggregationInfo> missingAggs = userAggs.stream()
+                .filter(agg -> !mvAggs.contains(agg))
                 .collect(Collectors.toSet());
-        if (!missingAggs.isEmpty()) {
-            reasons.add(String.format("Aggregation mismatch for table '%s'. Query needs %s, MV has %s. Missing: %s",
-                    actualUserQueryTableToReplace, userAggs, mvAggs, missingAggs));
+            
+            if (!missingAggs.isEmpty()) {
+                failures.add(String.format("Missing aggregations: %s", missingAggs));
+            }
         }
 
+        private void validateColumnAvailability() {
+            if (originalTableSchema == null || originalTableSchema.getParsedSchema() == null) {
+                failures.add("Original table schema not available for column validation");
+                return;
+            }
 
+            Set<String> cleanedUserColumns = cleanUserColumns(userNeededColumns);
+            Set<String> missingColumns = findMissingColumns(cleanedUserColumns, mvAvailableColumns, originalTableColumns);
+            
+            if (!missingColumns.isEmpty()) {
+                failures.add(String.format("Missing essential columns: %s", missingColumns));
+            }
+        }
 
-        // 4. Column Availability: MV must provide all *base columns* needed for filters and projections.
-        Set<String> allUserNeededNormalizedColumns = new HashSet<>();
-        allUserNeededNormalizedColumns.addAll(userNeededFilterColumns);
-        allUserNeededNormalizedColumns.addAll(userNeededProjectionColumns);
-        allUserNeededNormalizedColumns.remove("*"); // Don't check for global "*" presence in MV
-        // Also remove "alias.*" patterns from checking, as MV stores specific columns
-        allUserNeededNormalizedColumns.removeIf(col -> col.endsWith(".*"));
+        private Set<String> findMissingColumns(Set<String> needed, Set<String> available, Set<String> originalColumns) {
+            return needed.stream()
+                .filter(col -> !available.contains(col) && originalColumns.contains(col))
+                .collect(Collectors.toSet());
+        }
 
-        Set<String> missingEssentialCols = new HashSet<>();
-        
-        // Declare originalTableNormalizedSchemaCols outside the if block to ensure it's accessible later
-        Set<String> originalTableNormalizedSchemaCols = new HashSet<>();
-        
-        if (originalTableSchema == null || originalTableSchema.getParsedSchema() == null) {
-             reasons.add(String.format("Schema for original table '%s' not available, cannot reliably check column availability.", actualUserQueryTableToReplace));
-        } else {
-            originalTableNormalizedSchemaCols = originalTableSchema.getParsedSchema().stream()
+        private Set<String> cleanUserColumns(Set<String> columns) {
+            return columns.stream()
+                .filter(col -> !col.equals("*") && !col.endsWith(".*"))
+                .collect(Collectors.toSet());
+        }
+
+        private Set<String> combineColumns(Collection<String> set1, Collection<String> set2) {
+            Set<String> combined = new HashSet<>();
+            combined.addAll(normalizeColumns(set1));
+            combined.addAll(normalizeColumns(set2));
+            return combined;
+        }
+
+        private Set<String> extractOriginalTableColumns() {
+            if (originalTableSchema == null || originalTableSchema.getParsedSchema() == null) {
+                return new HashSet<>();
+            }
+            
+            return originalTableSchema.getParsedSchema().stream()
                 .map(colDef -> normalizeColumns(Collections.singletonList(colDef.getName())).iterator().next())
                 .collect(Collectors.toSet());
-            logger.debug("Normalized columns from schema of '{}': {}", actualUserQueryTableToReplace, originalTableNormalizedSchemaCols);
+        }
+    }
 
-            for (String neededCol : allUserNeededNormalizedColumns) {
-                if (!mvAvailableNormalizedColumns.contains(neededCol)) { // MV doesn't have this needed column
-                    // Check if this needed column *should* have come from the table MV is replacing
-                    if (originalTableNormalizedSchemaCols.contains(neededCol)) {
-                        // Yes, it was part of the original table's schema, so MV should provide it.
-                        missingEssentialCols.add(neededCol);
-                    } else {
-                        // No, it wasn't part of the original table's schema.
-                        // So, it must be from another table in the user's query. Not MV's fault.
-                        logger.trace("Needed column '{}' is not in MV, but also not in schema of original table '{}'. Assuming it's from another table.", neededCol, actualUserQueryTableToReplace);
-                    }
-                }
-            }
+    /**
+     * Normalizes column names by removing qualifiers and quotes, and converting to lowercase.
+     */
+    private static Set<String> normalizeColumns(Collection<String> columns) {
+        if (columns == null) {
+            return new HashSet<>();
         }
-        // --- Result ---
-        if (!missingEssentialCols.isEmpty()) {
-            reasons.add(String.format("Column availability mismatch for table '%s'. MV is missing essential columns: %s. (MV has: %s, User query needs these from original table: %s)",
-                    actualUserQueryTableToReplace, missingEssentialCols, mvAvailableNormalizedColumns, allUserNeededNormalizedColumns.stream().filter(originalTableNormalizedSchemaCols::contains).collect(Collectors.toSet())));
-        }
+        
+        return columns.stream()
+                .map(RewriteMatcher::normalizeColumnName)
+                .collect(Collectors.toSet());
+    }
 
-        // --- Result ---
-        if (reasons.isEmpty()) {
-            logger.info("Potential match! MV for base table '{}' can satisfy relevant parts of user query for replacing table '{}'.",
-                    mvMetadata.getBaseTable(), actualUserQueryTableToReplace);
-            return MatchResult.success();
-        } else {
-            logger.info("MV for base '{}' cannot satisfy query for replacing table '{}'. Reasons: {}",
-                    mvMetadata.getBaseTable(), actualUserQueryTableToReplace, reasons.stream().collect(Collectors.joining("; ")));
-            return MatchResult.failure(reasons);
+    private static String normalizeColumnName(String column) {
+        // Strip qualifier if present (but not for function calls)
+        int dotIndex = column.lastIndexOf('.');
+        if (dotIndex >= 0 && !column.contains("(")) {
+            column = column.substring(dotIndex + 1);
         }
+        
+        // Remove quotes and convert to lowercase
+        return column.replace("\"", "").toLowerCase();
     }
 }
