@@ -5,13 +5,13 @@ import java.util.Optional;
 import java.util.ArrayList; // Import ArrayList
 
 public class QueryMetadata {
-    private String baseTable;
+    private String baseTable; // This might represent the primary/first table, or the target for replacement
     private Optional<String> tableAlias = Optional.empty();
     private List<String> projectionColumns = new ArrayList<>();
     private List<AggregationInfo> aggregations = new ArrayList<>();
     private List<String> groupByColumns = new ArrayList<>();
     private List<String> filterColumns = new ArrayList<>();
-
+    private List<String> allBaseTables = new ArrayList<>(); // New field
 
     // Getters and setters
     public String getBaseTable() { return baseTable; }
@@ -31,4 +31,8 @@ public class QueryMetadata {
 
     public List<String> getFilterColumns() { return filterColumns; }
     public void setFilterColumns(List<String> filterColumns) { this.filterColumns = filterColumns; }
+
+    // Getter and Setter for allBaseTables
+    public List<String> getAllBaseTables() { return allBaseTables; }
+    public void setAllBaseTables(List<String> allBaseTables) { this.allBaseTables = allBaseTables; }
 }

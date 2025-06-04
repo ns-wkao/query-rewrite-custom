@@ -17,6 +17,25 @@ tables:
       - ns_creation_timestamp: TIMESTAMP
       - signature_id: INTEGER
 
+  'redshift_poc_iceberg.page_v3':
+    schema:
+      - organization_unit: VARCHAR
+      - appcategory: VARCHAR
+      - app: VARCHAR
+      - ur_normalized: VARCHAR
+      - ns_category_id: INTEGER
+      - timestamp: TIMESTAMP
+      - ns_tenant_id: INTEGER
+      - count: INTEGER
+      - site: VARCHAR
+
+  'redshift_poc_iceberg.appcategory':
+    schema:
+      - ns_tenant_id: INTEGER
+      - category_id: INTEGER
+      - app_category_current_name: VARCHAR
+
+
 materializedViews:
   MV_SIMPLE_PROJECTION:
     definition: >
@@ -63,7 +82,7 @@ materializedViews:
         alert_type,
         organization_unit,
         app,
-        instance_id
+        instance_id,
         SUM("count") AS count,
         SUM(numbytes) AS numbytes,
         SUM(file_size) AS file_size
