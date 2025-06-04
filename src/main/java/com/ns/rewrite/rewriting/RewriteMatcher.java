@@ -127,14 +127,78 @@ public class RewriteMatcher {
         }
 
         private void validateAggregations() {
-            Set<AggregationInfo> missingAggs = userAggs.stream()
+            Set<AggregationInfo> exactlyMissingAggs = userAggs.stream()
                 .filter(agg -> !mvAggs.contains(agg))
                 .collect(Collectors.toSet());
             
-            if (!missingAggs.isEmpty()) {
-                failures.add(String.format("Missing aggregations: %s", missingAggs));
+            if (exactlyMissingAggs.isEmpty()) {
+                return; // All aggregations are directly available
+            }
+            
+            // Check if missing aggregations can be computed from available MV columns
+            Set<AggregationInfo> uncomputableAggs = exactlyMissingAggs.stream()
+                .filter(agg -> !canComputeAggregation(agg))
+                .collect(Collectors.toSet());
+            
+            if (!uncomputableAggs.isEmpty()) {
+                failures.add(String.format("Missing aggregations that cannot be computed: %s", uncomputableAggs));
+            } else if (!exactlyMissingAggs.isEmpty()) {
+                logger.debug("The following aggregations can be computed from MV: {}", exactlyMissingAggs);
             }
         }
+
+        /**
+         * Determines if an aggregation can be computed from the materialized view's available columns.
+         */
+        private boolean canComputeAggregation(AggregationInfo agg) {
+            String function = agg.getFunctionName().toLowerCase();
+            List<String> args = agg.getArguments();
+            
+            switch (function) {
+                case "count":
+                    return canComputeCount(agg);
+                case "sum":
+                    return canComputeSum(agg);
+                default:
+                    // For unknown functions, be conservative and return false
+                    return false;
+            }
+        }
+
+        private boolean canComputeCount(AggregationInfo agg) {
+            if (agg.isDistinct()) {
+                // COUNT(DISTINCT col) can be computed ONLY if 'col' is a GROUP BY key in the MV
+                // This works because if col is a grouping key, each row in MV represents 
+                // a distinct value of col (among other grouping dimensions)
+                return agg.getArguments().stream()
+                    .allMatch(arg -> mvGroupBys.contains(arg.toLowerCase()));
+            } else {
+                // COUNT(*) or COUNT(col) - if we have any pre-computed count or if all referenced columns are available
+                if (agg.getArguments().isEmpty() || agg.getArguments().contains("*")) {
+                    // COUNT(*) can be computed if we have any count aggregation in MV or if we can count groups
+                    return hasAnyCountAggregation() || !mvGroupBys.isEmpty();
+                } else {
+                    // COUNT(col) can be computed if col is available
+                    return agg.getArguments().stream()
+                        .allMatch(arg -> mvAvailableColumns.contains(arg.toLowerCase()));
+                }
+            }
+        }
+
+        private boolean canComputeSum(AggregationInfo agg) {
+            // SUM(col) can be computed if:
+            // 1. We have the exact SUM(col) in MV, OR
+            // 2. We have 'col' available and can sum it up from MV groups
+            return agg.getArguments().stream()
+                .allMatch(arg -> mvAvailableColumns.contains(arg.toLowerCase()));
+        }
+
+        private boolean hasAnyCountAggregation() {
+            return mvAggs.stream()
+                .anyMatch(agg -> agg.getFunctionName().equals("count"));
+        }
+
+
 
         private void validateColumnAvailability() {
             if (originalTableSchema == null || originalTableSchema.getParsedSchema() == null) {

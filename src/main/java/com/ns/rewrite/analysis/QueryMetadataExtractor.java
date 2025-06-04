@@ -22,11 +22,11 @@ public class QueryMetadataExtractor {
         MetadataExtractor extractor = new MetadataExtractor();
         QueryMetadata metadata = extractor.extract((Query) queryStatement);
         
-        logger.info("Extracted metadata for base table '{}' with {} projections, {} filters, {} aggregations", 
+        logger.info("Extracted metadata for base table '{}' with projections: {}, filters: {}, aggregations: {}", 
             metadata.getBaseTable(), 
-            metadata.getProjectionColumns().size(),
-            metadata.getFilterColumns().size(), 
-            metadata.getAggregations().size());
+            metadata.getProjectionColumns(),
+            metadata.getFilterColumns(), 
+            metadata.getAggregations());
         
         return metadata;
     }

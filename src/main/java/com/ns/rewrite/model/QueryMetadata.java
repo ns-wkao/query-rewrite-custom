@@ -1,38 +1,73 @@
+// File: src/main/java/com/ns/rewrite/model/QueryMetadata.java
 package com.ns.rewrite.model;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.ArrayList; // Import ArrayList
+import java.util.ArrayList;
 
 public class QueryMetadata {
-    private String baseTable; // This might represent the primary/first table, or the target for replacement
+    private String baseTable; // Fully qualified name of the primary base table
     private Optional<String> tableAlias = Optional.empty();
     private List<String> projectionColumns = new ArrayList<>();
     private List<AggregationInfo> aggregations = new ArrayList<>();
     private List<String> groupByColumns = new ArrayList<>();
     private List<String> filterColumns = new ArrayList<>();
-    private List<String> allBaseTables = new ArrayList<>(); // New field
+    private List<String> allBaseTables = new ArrayList<>();
 
     // Getters and setters
-    public String getBaseTable() { return baseTable; }
-    public void setBaseTable(String baseTable) { this.baseTable = baseTable; }
+    public String getBaseTable() {
+        return baseTable;
+    }
 
-    public Optional<String> getTableAlias() { return tableAlias; }
-    public void setTableAlias(Optional<String> tableAlias) { this.tableAlias = tableAlias; }
+    public void setBaseTable(String baseTable) {
+        this.baseTable = baseTable;
+    }
 
-    public List<String> getProjectionColumns() { return projectionColumns; }
-    public void setProjectionColumns(List<String> projectionColumns) { this.projectionColumns = projectionColumns; }
+    public Optional<String> getTableAlias() {
+        return tableAlias;
+    }
 
-    public List<AggregationInfo> getAggregations() { return aggregations; }
-    public void setAggregations(List<AggregationInfo> aggregations) { this.aggregations = aggregations; }
+    public void setTableAlias(Optional<String> tableAlias) {
+        this.tableAlias = tableAlias;
+    }
 
-    public List<String> getGroupByColumns() { return groupByColumns; }
-    public void setGroupByColumns(List<String> groupByColumns) { this.groupByColumns = groupByColumns; }
+    public List<String> getProjectionColumns() {
+        return projectionColumns;
+    }
 
-    public List<String> getFilterColumns() { return filterColumns; }
-    public void setFilterColumns(List<String> filterColumns) { this.filterColumns = filterColumns; }
+    public void setProjectionColumns(List<String> projectionColumns) {
+        this.projectionColumns = projectionColumns;
+    }
 
-    // Getter and Setter for allBaseTables
-    public List<String> getAllBaseTables() { return allBaseTables; }
-    public void setAllBaseTables(List<String> allBaseTables) { this.allBaseTables = allBaseTables; }
+    public List<AggregationInfo> getAggregations() {
+        return aggregations;
+    }
+
+    public void setAggregations(List<AggregationInfo> aggregations) {
+        this.aggregations = aggregations;
+    }
+
+    public List<String> getGroupByColumns() {
+        return groupByColumns;
+    }
+
+    public void setGroupByColumns(List<String> groupByColumns) {
+        this.groupByColumns = groupByColumns;
+    }
+
+    public List<String> getFilterColumns() {
+        return filterColumns;
+    }
+
+    public void setFilterColumns(List<String> filterColumns) {
+        this.filterColumns = filterColumns;
+    }
+
+    public List<String> getAllBaseTables() {
+        return allBaseTables;
+    }
+
+    public void setAllBaseTables(List<String> allBaseTables) {
+        this.allBaseTables = allBaseTables;
+    }
 }

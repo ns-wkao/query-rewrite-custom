@@ -10,9 +10,12 @@ tables:
       - timestamp: TIMESTAMP
       - url: VARCHAR
       - count: INTEGER
+      - numbytes: INTEGER
+      - file_size: INTEGER
       - ur_normalized: VARCHAR
       - alert_type: VARCHAR
       - malware_name: VARCHAR
+      - site: VARCHAR
       - ns_tenant_id: INTEGER
       - ns_creation_timestamp: TIMESTAMP
       - signature_id: INTEGER
@@ -23,9 +26,9 @@ tables:
       - appcategory: VARCHAR
       - app: VARCHAR
       - ur_normalized: VARCHAR
-      - ns_category_id: INTEGER
       - timestamp: TIMESTAMP
       - ns_tenant_id: INTEGER
+      - ns_category_id: INTEGER
       - count: INTEGER
       - site: VARCHAR
 
@@ -84,6 +87,7 @@ materializedViews:
         app,
         instance_id,
         malware_name,
+        site,
         SUM("count") AS count,
         SUM(numbytes) AS numbytes,
         SUM(file_size) AS file_size
@@ -99,7 +103,8 @@ materializedViews:
         organization_unit,
         app,
         instance_id,
-        malware_name
+        malware_name,
+        site
     targetTable: redshift_poc_iceberg.alert_event_daily_sum_detailed
 
   MV_PAGE_EVENT_DAILY_AGG_DETAILED:
@@ -108,7 +113,12 @@ materializedViews:
         date_trunc('day', timestamp)  AS timestamp,
         app,
         ns_tenant_id,
+        ns_category_id,
         organization_unit,
+        ur_normalized,
+        appcategory,
+        site,
+        SUM("count") AS count,
         SUM(numbytes) AS numbytes,
         SUM(client_bytes) AS client_bytes,
         SUM(server_bytes) AS server_bytes
@@ -118,5 +128,9 @@ materializedViews:
         date_trunc('day', timestamp),
         app,
         ns_tenant_id,
-        organization_unit
+        ns_category_id,
+        organization_unit,
+        ur_normalized,
+        appcategory,
+        site
     targetTable: redshift_poc_iceberg.page_event_daily_sum
