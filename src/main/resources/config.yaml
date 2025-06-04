@@ -83,6 +83,7 @@ materializedViews:
         organization_unit,
         app,
         instance_id,
+        malware_name,
         SUM("count") AS count,
         SUM(numbytes) AS numbytes,
         SUM(file_size) AS file_size
@@ -97,5 +98,25 @@ materializedViews:
         alert_type,
         organization_unit,
         app,
-        instance_id
+        instance_id,
+        malware_name
     targetTable: redshift_poc_iceberg.alert_event_daily_sum_detailed
+
+  MV_PAGE_EVENT_DAILY_AGG_DETAILED:
+    definition: >
+      SELECT
+        date_trunc('day', timestamp)  AS timestamp,
+        app,
+        ns_tenant_id,
+        organization_unit,
+        SUM(numbytes) AS numbytes,
+        SUM(client_bytes) AS client_bytes,
+        SUM(server_bytes) AS server_bytes
+      FROM
+        "redshift_poc_iceberg"."page_v3"
+      GROUP BY
+        date_trunc('day', timestamp),
+        app,
+        ns_tenant_id,
+        organization_unit
+    targetTable: redshift_poc_iceberg.page_event_daily_sum
