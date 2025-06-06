@@ -64,8 +64,6 @@ public class RewriteMatcher {
         private final Set<AggregationInfo> mvAggs;
         private final Set<String> userNeededColumns;
         private final Set<String> mvAvailableColumns;
-        private final Set<String> originalTableColumns;
-
         MatchValidator(QueryMetadata userMetadata, QueryMetadata mvMetadata, 
                       String targetTableName, TableDefinition originalTableSchema) {
             this.userMetadata = userMetadata;
@@ -87,7 +85,6 @@ public class RewriteMatcher {
                 mvMetadata.getProjectionColumns(), 
                 mvMetadata.getGroupByColumns()
             );
-            this.originalTableColumns = extractOriginalTableColumns();
         }
 
         MatchResult validate() {
@@ -100,12 +97,12 @@ public class RewriteMatcher {
             validateColumnAvailability();
             
             if (failures.isEmpty()) {
-                logger.info("MV '{}' can satisfy user query for table '{}'", 
-                    mvMetadata.getBaseTable(), targetTableName);
+                logger.info("MV can satisfy user query for table '{}'", 
+                    targetTableName);
                 return MatchResult.success();
             } else {
-                logger.info("MV '{}' cannot satisfy query for table '{}': {}", 
-                    mvMetadata.getBaseTable(), targetTableName, String.join("; ", failures));
+                logger.info("MV cannot satisfy query for table '{}': {}", 
+                    targetTableName, String.join("; ", failures));
                 return MatchResult.failure(failures);
             }
         }
@@ -120,14 +117,20 @@ public class RewriteMatcher {
         }
 
         private void validateGroupByColumns() {
-            Set<String> missingGroupBys = findMissingColumns(userGroupBys, mvGroupBys, originalTableColumns);
+            Set<String> missingGroupBys = findMissingColumns(userGroupBys, mvGroupBys);
             if (!missingGroupBys.isEmpty()) {
                 failures.add(String.format("Missing GROUP BY columns: %s", missingGroupBys));
             }
         }
 
         private void validateAggregations() {
-            Set<AggregationInfo> exactlyMissingAggs = userAggs.stream()
+            // Filter aggregations to only consider those relevant to the target table
+            Set<AggregationInfo> relevantUserAggs = userAggs.stream()
+                .map(this::filterAggregationToTargetTable)
+                .filter(agg -> agg != null) // Only keep non-null aggregations (null means no relevant args)
+                .collect(Collectors.toSet());
+            
+            Set<AggregationInfo> exactlyMissingAggs = relevantUserAggs.stream()
                 .filter(agg -> !mvAggs.contains(agg))
                 .collect(Collectors.toSet());
             
@@ -145,6 +148,33 @@ public class RewriteMatcher {
             } else if (!exactlyMissingAggs.isEmpty()) {
                 logger.debug("The following aggregations can be computed from MV: {}", exactlyMissingAggs);
             }
+        }
+        
+        private AggregationInfo filterAggregationToTargetTable(AggregationInfo agg) {
+            String tablePrefix = targetTableName.toLowerCase() + ".";
+            
+            // Filter arguments to only include those from the target table and are real columns
+            List<String> filteredArgs = agg.getArguments().stream()
+                .filter(arg -> {
+                    // Allow * and empty arguments (for COUNT(*))
+                    if (arg.equals("*") || arg.isEmpty()) {
+                        return true;
+                    }
+                    // Only include arguments that belong to target table and are real columns
+                    return arg.startsWith(tablePrefix) && isRealColumnInBaseTable(arg);
+                })
+                .collect(Collectors.toList());
+            
+            // If the original aggregation had arguments but none remain after filtering, filter it out
+            // Exception: COUNT(*) and similar have empty/star arguments and should be kept
+            boolean originalHadRealArgs = !agg.getArguments().isEmpty() && 
+                                        !agg.getArguments().contains("*");
+            if (filteredArgs.isEmpty() && originalHadRealArgs) {
+                return null;
+            }
+            
+            // Return new AggregationInfo with filtered arguments
+            return new AggregationInfo(agg.getFunctionName(), filteredArgs, agg.isDistinct());
         }
 
         /**
@@ -206,18 +236,47 @@ public class RewriteMatcher {
                 return;
             }
 
+
+            logger.debug("Validating column availability...");
             Set<String> cleanedUserColumns = cleanUserColumns(userNeededColumns);
-            Set<String> missingColumns = findMissingColumns(cleanedUserColumns, mvAvailableColumns, originalTableColumns);
-            
+            Set<String> missingColumns = findMissingColumns(cleanedUserColumns, mvAvailableColumns);
+            logger.debug("Cleaned user columns: {}", cleanedUserColumns);
+            logger.debug("MV available columns: {}", mvAvailableColumns);
+
+
             if (!missingColumns.isEmpty()) {
                 failures.add(String.format("Missing essential columns: %s", missingColumns));
             }
         }
 
-        private Set<String> findMissingColumns(Set<String> needed, Set<String> available, Set<String> originalColumns) {
+        private Set<String> findMissingColumns(Set<String> needed, Set<String> available) {
+            // Conservative approach: Only consider qualified columns that clearly belong to the target table
+            // AND actually exist in the base table schema (not aliases/computed columns)
+            String tablePrefix = targetTableName.toLowerCase() + ".";
+            
             return needed.stream()
-                .filter(col -> !available.contains(col) && originalColumns.contains(col))
+                .filter(col -> col.startsWith(tablePrefix))           // Only qualified columns from the target table
+                .filter(col -> isRealColumnInBaseTable(col))          // That actually exist in the base table schema
+                .filter(col -> !available.contains(col))             // That are missing from MV
                 .collect(Collectors.toSet());
+        }
+        
+        private boolean isRealColumnInBaseTable(String qualifiedColumnName) {
+            if (originalTableSchema == null || originalTableSchema.getParsedSchema() == null) {
+                return true; // If no schema available, assume it's real to be safe
+            }
+            
+            String tablePrefix = targetTableName.toLowerCase() + ".";
+            if (!qualifiedColumnName.startsWith(tablePrefix)) {
+                return false;
+            }
+            
+            // Extract the column name without the table prefix
+            String columnName = qualifiedColumnName.substring(tablePrefix.length());
+            
+            // Check if this column exists in the base table schema
+            return originalTableSchema.getParsedSchema().stream()
+                .anyMatch(colDef -> colDef.getName().toLowerCase().equals(columnName));
         }
 
         private Set<String> cleanUserColumns(Set<String> columns) {
@@ -233,15 +292,6 @@ public class RewriteMatcher {
             return combined;
         }
 
-        private Set<String> extractOriginalTableColumns() {
-            if (originalTableSchema == null || originalTableSchema.getParsedSchema() == null) {
-                return new HashSet<>();
-            }
-            
-            return originalTableSchema.getParsedSchema().stream()
-                .map(colDef -> normalizeColumns(Collections.singletonList(colDef.getName())).iterator().next())
-                .collect(Collectors.toSet());
-        }
     }
 
     /**
@@ -258,13 +308,6 @@ public class RewriteMatcher {
     }
 
     private static String normalizeColumnName(String column) {
-        // Strip qualifier if present (but not for function calls)
-        int dotIndex = column.lastIndexOf('.');
-        if (dotIndex >= 0 && !column.contains("(")) {
-            column = column.substring(dotIndex + 1);
-        }
-        
-        // Remove quotes and convert to lowercase
-        return column.replace("\"", "").toLowerCase();
+        return column.toLowerCase();
     }
 }

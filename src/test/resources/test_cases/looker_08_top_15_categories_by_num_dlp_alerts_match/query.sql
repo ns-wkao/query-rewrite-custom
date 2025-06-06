@@ -2,9 +2,9 @@ WITH
   alert_event AS (
     SELECT
       *,
-      action AS derived_action,
-      policy AS derived_policy,
-      transaction_id AS derived_transaction_id
+      action as derived_action,
+      policy as derived_policy,
+      transaction_id as derived_transaction_id
     FROM
       (
         SELECT
@@ -17,11 +17,19 @@ WITH
           A.ns_tenant_id = 2683
           AND (
             (
-              (A.TIMESTAMP) >= (TIMESTAMP '2025-01-03')
-              AND (A.TIMESTAMP) < (TIMESTAMP '2025-01-17')
+              (A.timestamp) >= (TIMESTAMP '2025-01-03')
+              AND (A.timestamp) < (TIMESTAMP '2025-01-17')
             )
           )
       )
+  ),
+  app_category AS (
+    SELECT
+      *
+    FROM
+      "redshift_poc_iceberg"."appcategory"
+    WHERE
+      ns_tenant_id IN (2683, -1)
   )
 SELECT
   *
@@ -32,13 +40,13 @@ FROM
       DENSE_RANK() OVER (
         ORDER BY
           z___min_rank
-      ) AS z___pivot_row_rank,
+      ) as z___pivot_row_rank,
       RANK() OVER (
         PARTITION BY
           z__pivot_col_rank
         ORDER BY
           z___min_rank
-      ) AS z__pivot_col_ordering,
+      ) as z__pivot_col_ordering,
       CASE
         WHEN z___min_rank = z___rank THEN 1
         ELSE 0
@@ -49,16 +57,30 @@ FROM
           *,
           MIN(z___rank) OVER (
             PARTITION BY
-              "alert_event.event_timestamp_date"
-          ) AS z___min_rank
+              "alert_event.appcategory"
+          ) as z___min_rank
         FROM
           (
             SELECT
               *,
               RANK() OVER (
                 ORDER BY
-                  "alert_event.event_timestamp_date" DESC,
-                  z__pivot_col_rank
+                  CASE
+                    WHEN z__pivot_col_rank = 6 THEN (
+                      CASE
+                        WHEN "alert_event.event_count" IS NOT NULL THEN 0
+                        ELSE 1
+                      END
+                    )
+                    ELSE 2
+                  END,
+                  CASE
+                    WHEN z__pivot_col_rank = 6 THEN "alert_event.event_count"
+                    ELSE NULL
+                  END DESC,
+                  "alert_event.event_count" DESC,
+                  z__pivot_col_rank,
+                  "alert_event.appcategory"
               ) AS z___rank
             FROM
               (
@@ -67,24 +89,28 @@ FROM
                   DENSE_RANK() OVER (
                     ORDER BY
                       CASE
-                        WHEN "alert_event.access_method" IS NULL THEN 1
+                        WHEN "alert_event.dlp_rule_severity" IS NULL THEN 1
                         ELSE 0
                       END,
-                      "alert_event.access_method"
+                      "alert_event.dlp_rule_severity"
                   ) AS z__pivot_col_rank
                 FROM
                   (
                     SELECT
-                      alert_event.access_method AS "alert_event.access_method",
-                      (DATE_FORMAT(alert_event.TIMESTAMP, '%Y-%m-%d')) AS "alert_event.event_timestamp_date",
+                      alert_event.dlp_rule_severity AS "alert_event.dlp_rule_severity",
+                      coalesce(
+                        app_category.app_category_current_name,
+                        alert_event.appcategory
+                      ) AS "alert_event.appcategory",
                       COALESCE(SUM(alert_event.count), 0) AS "alert_event.event_count"
                     FROM
                       alert_event
+                      LEFT JOIN app_category ON alert_event.ns_category_id = app_category.category_id
                     WHERE
                       (
                         (
-                          (alert_event.TIMESTAMP) >= (TIMESTAMP '2025-01-03')
-                          AND (alert_event.TIMESTAMP) < (TIMESTAMP '2025-01-17')
+                          (alert_event.timestamp) >= (TIMESTAMP '2025-01-03')
+                          AND (alert_event.timestamp) < (TIMESTAMP '2025-01-17')
                         )
                       )
                       AND (alert_event.alert_type) = 'DLP'
@@ -113,7 +139,7 @@ WHERE
     OR z__is_highest_ranked_cell = 1
   )
   AND (
-    z___pivot_row_rank <= 500
+    z___pivot_row_rank <= 5000
     OR z__pivot_col_ordering = 1
   )
 ORDER BY

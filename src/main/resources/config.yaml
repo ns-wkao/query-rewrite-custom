@@ -5,6 +5,7 @@ tables:
       - policy: VARCHAR
       - transaction_id: INTEGER
       - organization_unit: VARCHAR
+      - appcategory: VARCHAR
       - app: VARCHAR
       - instance_id: VARCHAR
       - timestamp: TIMESTAMP
@@ -16,6 +17,7 @@ tables:
       - alert_type: VARCHAR
       - malware_name: VARCHAR
       - site: VARCHAR
+      - dlp_rule_severity: VARCHAR
       - ns_tenant_id: INTEGER
       - ns_creation_timestamp: TIMESTAMP
       - signature_id: INTEGER
@@ -84,10 +86,12 @@ materializedViews:
         ns_tenant_id,
         alert_type,
         organization_unit,
+        appcategory,
         app,
         instance_id,
         malware_name,
         site,
+        dlp_rule_severity,
         SUM("count") AS count,
         SUM(numbytes) AS numbytes,
         SUM(file_size) AS file_size
@@ -101,10 +105,12 @@ materializedViews:
         ns_tenant_id,
         alert_type,
         organization_unit,
+        appcategory,
         app,
         instance_id,
         malware_name,
-        site
+        site,
+        dlp_rule_severity
     targetTable: redshift_poc_iceberg.alert_event_daily_sum_detailed
 
   MV_PAGE_EVENT_DAILY_AGG_DETAILED:

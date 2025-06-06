@@ -1,0 +1,47 @@
+WITH
+  alert_event AS (
+    SELECT
+      *,
+      action derived_action,
+      policy derived_policy,
+      transaction_id derived_transaction_id
+    FROM
+      (
+        SELECT
+          A.*,
+          SPLIT(A.organization_unit, '/') OU,
+          CONCAT(A.app, A.instance_id) ns_app_instance
+        FROM
+          redshift_poc_iceberg.alert_event_daily_sum_detailed A
+        WHERE
+          (
+            (A.ns_tenant_id = 2683)
+            AND (
+              (A.TIMESTAMP >= TIMESTAMP '2025-01-03')
+              AND (A.TIMESTAMP < TIMESTAMP '2025-01-17')
+            )
+          )
+      )
+  )
+SELECT
+  COUNT(DISTINCT alert_event.derived_policy) "policies"
+FROM
+  alert_event
+WHERE
+  (
+    (
+      (alert_event.TIMESTAMP >= TIMESTAMP '2025-01-03')
+      AND (alert_event.TIMESTAMP < TIMESTAMP '2025-01-17')
+    )
+    AND (alert_event.ns_tenant_id = 2683)
+    AND (
+      (1 = 1)
+      AND (1 = 1)
+      AND (1 = 1)
+      AND (1 = 1)
+      AND (1 = 1)
+      AND (1 = 1)
+    )
+  )
+LIMIT
+  500

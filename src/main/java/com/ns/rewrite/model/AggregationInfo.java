@@ -10,22 +10,17 @@ public class AggregationInfo {
     private final boolean distinct;
 
     /**
-     * Normalizes an argument string by removing quotes and qualifiers.
-     * Example: "schema"."column" -> column
-     * alert_event.count -> count
+     * Normalizes an argument string by removing qualifiers.
      * "count" -> count
      */
     private String normalizeArgument(String arg) {
-        String noQuotes = arg.replace("\"", "");
-        int dot = noQuotes.lastIndexOf('.');
-        // Take part after last dot, or the whole thing if no dot.
-        String unqualified = (dot >= 0 ? noQuotes.substring(dot + 1) : noQuotes);
-        return unqualified.toLowerCase();
+        //String noQuotes = arg.replace("\"", "");
+        //return noQuotes.toLowerCase();
+        return arg.toLowerCase();
     }
 
     public AggregationInfo(String functionName, List<String> arguments, boolean distinct) {
         this.functionName = functionName.toLowerCase();
-        // Apply normalization during construction
         this.arguments = arguments.stream()
                                   .map(this::normalizeArgument)
                                   .collect(Collectors.toList());
