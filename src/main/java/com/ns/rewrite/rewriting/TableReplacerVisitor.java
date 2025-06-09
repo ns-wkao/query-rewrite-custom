@@ -14,6 +14,9 @@ import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
 import io.trino.sql.tree.With;
 import io.trino.sql.tree.WithQuery;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -21,27 +24,45 @@ import java.util.Optional;
 
 
 public class TableReplacerVisitor extends AstVisitor<Node, Void> {
+    private static final Logger logger = LoggerFactory.getLogger(TableReplacerVisitor.class);
+    
     private final String originalTableStringToMatch;
     private final QualifiedName newTableQualifiedName;
     private boolean changed = false;
+    private int replacementCount = 0;
 
     public TableReplacerVisitor(String originalTableStringToMatch, QualifiedName newTableQualifiedName) {
         this.originalTableStringToMatch = Objects.requireNonNull(originalTableStringToMatch, "originalTableStringToMatch is null");
         this.newTableQualifiedName = Objects.requireNonNull(newTableQualifiedName, "newTableQualifiedName is null");
+        
+        logger.info("Starting AST transformation: '{}' -> '{}'", originalTableStringToMatch, newTableQualifiedName);
     }
 
     public boolean didChange() {
+        if (changed) {
+            logger.info("AST transformation completed successfully. Replaced {} table references.", replacementCount);
+        } else {
+            logger.debug("AST transformation completed with no changes - no matching table references found.");
+        }
         return changed;
+    }
+    
+    public int getReplacementCount() {
+        return replacementCount;
     }
 
     @Override
     protected Node visitQuery(Query node, Void context) {
+        logger.debug("Processing Query node");
+        
         Optional<With> withNode = node.getWith();
         Optional<With> newWithNode = withNode; // Assume no change initially
         if (withNode.isPresent()) {
+            logger.debug("Processing WITH clause containing {} CTEs", withNode.get().getQueries().size());
             With processedWith = (With) process(withNode.get(), context);
             if (processedWith != withNode.get()) { // Check if 'with' clause object itself changed
                 newWithNode = Optional.of(processedWith);
+                logger.debug("WITH clause was modified during transformation");
             }
         }
 
@@ -50,21 +71,28 @@ public class TableReplacerVisitor extends AstVisitor<Node, Void> {
         
         if (newQueryBody != queryBody || newWithNode != withNode) {
             this.changed = true;
-            NodeLocation location = node.getLocation().orElseThrow(() ->
-                    new IllegalStateException("Original Query node is missing NodeLocation, " +
-                                              "cannot use non-deprecated constructor without a location.")
-            );
+            logger.debug("Query node was modified, reconstructing AST");
+            
+            try {
+                NodeLocation location = node.getLocation().orElseThrow(() ->
+                        new IllegalStateException("Original Query node is missing NodeLocation, " +
+                                                  "cannot use non-deprecated constructor without a location.")
+                );
 
-            return new Query(
-                    location,
-                    node.getSessionProperties(),
-                    node.getFunctions(),
-                    newWithNode,
-                    newQueryBody,
-                    node.getOrderBy(),
-                    node.getOffset(),
-                    node.getLimit()
-            );
+                return new Query(
+                        location,
+                        node.getSessionProperties(),
+                        node.getFunctions(),
+                        newWithNode,
+                        newQueryBody,
+                        node.getOrderBy(),
+                        node.getOffset(),
+                        node.getLimit()
+                );
+            } catch (Exception e) {
+                logger.error("Failed to reconstruct Query AST node: {}", e.getMessage(), e);
+                throw e;
+            }
         }
         return node;
     }
@@ -164,12 +192,23 @@ public class TableReplacerVisitor extends AstVisitor<Node, Void> {
     
     @Override
     protected Node visitTable(Table node, Void context) {
-        if (node.getName().toString().equals(originalTableStringToMatch)) {
+        String tableName = node.getName().toString();
+        logger.debug("Examining table reference: '{}'", tableName);
+        
+        if (tableName.equals(originalTableStringToMatch)) {
             this.changed = true;
-            if (node.getLocation().isPresent()) {
-                return new Table(node.getLocation().get(), newTableQualifiedName);
-            } else {
-                return new Table(newTableQualifiedName);
+            this.replacementCount++;
+            logger.debug("Found matching table reference '{}' - replacing with '{}'", tableName, newTableQualifiedName);
+            
+            try {
+                if (node.getLocation().isPresent()) {
+                    return new Table(node.getLocation().get(), newTableQualifiedName);
+                } else {
+                    return new Table(newTableQualifiedName);
+                }
+            } catch (Exception e) {
+                logger.error("Failed to replace table '{}' with '{}': {}", tableName, newTableQualifiedName, e.getMessage(), e);
+                throw e;
             }
         }
         return node;
@@ -177,23 +216,32 @@ public class TableReplacerVisitor extends AstVisitor<Node, Void> {
 
     @Override
     protected Node visitAliasedRelation(AliasedRelation node, Void context) {
+        logger.debug("Processing aliased relation with alias: '{}'", node.getAlias().getValue());
+        
         Relation relation = node.getRelation();
         Relation newRelation = (Relation) process(relation, context);
         if (newRelation != relation) {
             this.changed = true;
-            if (node.getLocation().isPresent()) {
-                return new AliasedRelation(
-                        node.getLocation().get(), 
-                        newRelation, 
-                        node.getAlias(), 
-                        node.getColumnNames()
-                );
-            } else {
-                return new AliasedRelation(
-                        newRelation, 
-                        node.getAlias(), 
-                        node.getColumnNames()
-                );
+            logger.debug("Aliased relation '{}' was modified during transformation", node.getAlias().getValue());
+            
+            try {
+                if (node.getLocation().isPresent()) {
+                    return new AliasedRelation(
+                            node.getLocation().get(), 
+                            newRelation, 
+                            node.getAlias(), 
+                            node.getColumnNames()
+                    );
+                } else {
+                    return new AliasedRelation(
+                            newRelation, 
+                            node.getAlias(), 
+                            node.getColumnNames()
+                    );
+                }
+            } catch (Exception e) {
+                logger.error("Failed to reconstruct aliased relation '{}': {}", node.getAlias().getValue(), e.getMessage(), e);
+                throw e;
             }
         }
         return node;
@@ -201,25 +249,34 @@ public class TableReplacerVisitor extends AstVisitor<Node, Void> {
 
     @Override
     protected Node visitJoin(Join node, Void context) {
+        logger.debug("Processing {} join", node.getType());
+        
         Relation left = (Relation) process(node.getLeft(), context);
         Relation right = (Relation) process(node.getRight(), context);
         if (left != node.getLeft() || right != node.getRight()) {
             this.changed = true;
-            if (node.getLocation().isPresent()) {
-                return new Join(
-                        node.getLocation().get(), 
-                        node.getType(), 
-                        left, 
-                        right, 
-                        node.getCriteria()
-                );
-            } else {
-                return new Join(
-                        node.getType(), 
-                        left, 
-                        right, 
-                        node.getCriteria()
-                );
+            logger.debug("Join relations were modified during transformation");
+            
+            try {
+                if (node.getLocation().isPresent()) {
+                    return new Join(
+                            node.getLocation().get(), 
+                            node.getType(), 
+                            left, 
+                            right, 
+                            node.getCriteria()
+                    );
+                } else {
+                    return new Join(
+                            node.getType(), 
+                            left, 
+                            right, 
+                            node.getCriteria()
+                    );
+                }
+            } catch (Exception e) {
+                logger.error("Failed to reconstruct {} join: {}", node.getType(), e.getMessage(), e);
+                throw e;
             }
         }
         return node;

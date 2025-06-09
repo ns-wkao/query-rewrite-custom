@@ -5,7 +5,21 @@
         </encoder>
     </appender>
 
-    <root level="DEBUG">
+    <!-- Logging configuration that can be controlled via system properties -->
+    <!-- For benchmark mode, use: -Dcom.ns.rewrite.SQLRewriter=WARN -->
+    <!-- This suppresses verbose main application logging during benchmarks -->
+    
+    <!-- Main application classes - default to INFO, can be overridden -->
+    <logger name="com.ns.rewrite.SQLRewriter" level="${com.ns.rewrite.SQLRewriter:-INFO}" />
+    <logger name="com.ns.rewrite.analysis.QueryMetadataExtractor" level="${com.ns.rewrite.analysis.QueryMetadataExtractor:-INFO}" />
+    <logger name="com.ns.rewrite.rewriting.RewriteMatcher" level="${com.ns.rewrite.rewriting.RewriteMatcher:-INFO}" />
+    <logger name="com.ns.rewrite.rewriting.TableReplacerVisitor" level="${com.ns.rewrite.rewriting.TableReplacerVisitor:-INFO}" />
+    
+    <!-- Benchmark classes - always visible -->
+    <logger name="com.ns.rewrite.QueryRewriteBenchmarkSuite" level="INFO" />
+    <logger name="com.ns.rewrite.BenchmarkTimer" level="DEBUG" />
+
+    <root level="INFO">
         <appender-ref ref="STDOUT" />
     </root>
 </configuration>

@@ -19,11 +19,17 @@ public class QueryMetadataExtractor {
             throw new IllegalArgumentException("Expected Query statement, got: " + queryStatement.getClass().getSimpleName());
         }
 
+        logger.info("Starting metadata extraction from query");
         MetadataExtractor extractor = new MetadataExtractor();
         QueryMetadata metadata = extractor.extract((Query) queryStatement);
         
-        logger.info("Extracted metadata for base table '{}' with projections: {}, filters: {}, aggregations: {}", 
+        logger.info("Metadata extraction completed for base table '{}' with {} projections, {} filters, {} aggregations", 
             metadata.getBaseTable(), 
+            metadata.getProjectionColumns().size(),
+            metadata.getFilterColumns().size(), 
+            metadata.getAggregations().size());
+            
+        logger.debug("Detailed metadata - projections: {}, filters: {}, aggregations: {}", 
             metadata.getProjectionColumns(),
             metadata.getFilterColumns(), 
             metadata.getAggregations());
@@ -47,12 +53,25 @@ public class QueryMetadataExtractor {
         private TableInfo primaryTable;
 
         QueryMetadata extract(Query query) {
+            logger.debug("Initializing CTE map and processing query structure");
             initializeCteMap(query);
             
+            logger.debug("Finding primary table from query");
             primaryTable = findPrimaryTable(query.getQueryBody());
+            if (primaryTable != null) {
+                logger.debug("Primary table identified: {}", primaryTable.name);
+            } else {
+                logger.warn("No primary table identified from query");
+            }
+            
+            logger.debug("Collecting all base tables from query");
             collectAllTables(query.getQueryBody()); // Collects all base tables involved
+            
+            logger.debug("Extracting metadata from all query components");
             extractAllMetadata(query.getQueryBody()); // Extracts projections, filters, etc.
-            //logger.info("cteColumnAliases: {}", cteColumnAliases);
+            
+            logger.debug("CTE column aliases mapping: {}", cteColumnAliases);
+            
             return buildMetadata();
         }
 
@@ -60,6 +79,7 @@ public class QueryMetadataExtractor {
             Map<String, String> contextMap = new HashMap<>();
             if (relation != null) {
                 populateSourceTableContext(relation, contextMap);
+                logger.debug("Built source table context: {}", contextMap);
             }
             return contextMap;
         }
@@ -131,13 +151,15 @@ public class QueryMetadataExtractor {
         }
 
         private void initializeCteMap(Query query) {
-            query.getWith().ifPresent(with -> 
+            query.getWith().ifPresent(with -> {
+                logger.debug("Processing WITH clause containing {} CTEs", with.getQueries().size());
                 with.getQueries().forEach(cte -> {
                     String cteName = cte.getName().getValue().toLowerCase();
                     cteMap.put(cteName, cte);
-                    //logger.info("cteMap populated with cteName: {} and cte: {}", cteName, cte);
+                    logger.debug("Added CTE '{}' to processing map", cteName);
                     extractCteColumnAliases(cteName, cte);
-                }));
+                });
+            });
         }
         
         private void extractCteColumnAliases(String cteName, WithQuery cte) {
@@ -156,14 +178,14 @@ public class QueryMetadataExtractor {
                         if (singleColumn.getExpression() instanceof Identifier) {
                             String originalColumn = ((Identifier) singleColumn.getExpression()).getValue().toLowerCase();
                             columnAliases.put(aliasName, originalColumn);
-                            //logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
+                            logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
                         } else if (singleColumn.getExpression() instanceof DereferenceExpression) {
                             // Handle qualified column references like A.policy -> derived_policy
                             DereferenceExpression deref = (DereferenceExpression) singleColumn.getExpression();
                             if (deref.getBase() instanceof Identifier && deref.getField().isPresent()) {
                                 String originalColumn = deref.getField().get().getValue().toLowerCase();
                                 columnAliases.put(aliasName, originalColumn);
-                                //logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
+                                logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
                             }
                         }
                     });
@@ -271,15 +293,17 @@ public class QueryMetadataExtractor {
                         .map(MetadataExtractor.this::buildSourceTableContext)
                         .orElse(Collections.emptyMap());
 
-                    //logger.info("Processing QuerySpecification with source table context: {}", sourceTableContext);
+                    logger.debug("Processing QuerySpecification with source table context: {}", sourceTableContext);
                     
                     Set<String> projections = extractProjections(spec, sourceTableContext);
                     Set<String> filters = extractFilters(spec, sourceTableContext);
                     Set<AggregationInfo> aggregations = extractAggregations(spec, sourceTableContext);
                     Set<String> groupBys = extractGroupBys(spec, sourceTableContext);
                     
-                    // logger.debug("Extracted projections: {}", projections);
-                    // logger.debug("Extracted filters: {}", filters);
+                    logger.debug("Extracted projections: {}", projections);
+                    logger.debug("Extracted filters: {}", filters);
+                    logger.debug("Extracted aggregations: {}", aggregations);
+                    logger.debug("Extracted group by columns: {}", groupBys);
                     
                     allProjections.addAll(projections);
                     allFilters.addAll(filters);

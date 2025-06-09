@@ -73,7 +73,7 @@ public class SQLRewriter {
 
     public String processUserQuery(String sql) {
         logger.info("--- Processing Query ---");
-        //logger.debug("Original SQL: {}", sql.replace('\n', ' '));
+        logger.debug("Original SQL: {}", sql.replace('\n', ' '));
 
         try {
             Statement stmt = sqlParser.createStatement(sql);

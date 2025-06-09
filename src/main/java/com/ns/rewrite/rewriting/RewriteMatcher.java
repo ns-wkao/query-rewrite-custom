@@ -43,8 +43,17 @@ public class RewriteMatcher {
                                          String targetTableName, 
                                          TableDefinition originalTableSchema) {
         
+        logger.info("Starting MV validation for table '{}' against user query", targetTableName);
         MatchValidator validator = new MatchValidator(userMetadata, mvMetadata, targetTableName, originalTableSchema);
-        return validator.validate();
+        MatchResult result = validator.validate();
+        
+        if (result.canSatisfy) {
+            logger.info("MV validation completed successfully for table '{}'", targetTableName);
+        } else {
+            logger.info("MV validation failed for table '{}': {}", targetTableName, String.join("; ", result.mismatchReasons));
+        }
+        
+        return result;
     }
 
     /**
@@ -88,55 +97,75 @@ public class RewriteMatcher {
         }
 
         MatchResult validate() {
+            logger.debug("Validating base table compatibility");
             if (!validateBaseTable()) {
                 return MatchResult.failure(failures);
             }
             
+            logger.debug("Validating GROUP BY column compatibility");
             validateGroupByColumns();
+            
+            logger.debug("Validating aggregation function compatibility");
             validateAggregations();
+            
+            logger.debug("Validating column availability");
             validateColumnAvailability();
             
             if (failures.isEmpty()) {
-                logger.info("MV can satisfy user query for table '{}'", 
-                    targetTableName);
+                logger.debug("All validation checks passed for table '{}'", targetTableName);
                 return MatchResult.success();
             } else {
-                logger.info("MV cannot satisfy query for table '{}': {}", 
-                    targetTableName, String.join("; ", failures));
+                logger.debug("Validation failed with {} issues: {}", failures.size(), String.join("; ", failures));
                 return MatchResult.failure(failures);
             }
         }
 
         private boolean validateBaseTable() {
+            logger.debug("Checking base table compatibility: MV='{}' vs Target='{}'", mvMetadata.getBaseTable(), targetTableName);
             if (!mvMetadata.getBaseTable().equalsIgnoreCase(targetTableName)) {
-                failures.add(String.format("MV base table '%s' does not match target table '%s'",
-                    mvMetadata.getBaseTable(), targetTableName));
+                String reason = String.format("MV base table '%s' does not match target table '%s'",
+                    mvMetadata.getBaseTable(), targetTableName);
+                failures.add(reason);
+                logger.debug("Base table validation failed: {}", reason);
                 return false;
             }
+            logger.debug("Base table validation passed");
             return true;
         }
 
         private void validateGroupByColumns() {
+            logger.debug("Checking GROUP BY compatibility: User={} vs MV={}", userGroupBys, mvGroupBys);
             Set<String> missingGroupBys = findMissingColumns(userGroupBys, mvGroupBys);
             if (!missingGroupBys.isEmpty()) {
-                failures.add(String.format("Missing GROUP BY columns: %s", missingGroupBys));
+                String reason = String.format("Missing GROUP BY columns: %s", missingGroupBys);
+                failures.add(reason);
+                logger.debug("GROUP BY validation failed: {}", reason);
+            } else {
+                logger.debug("GROUP BY validation passed - all required columns available");
             }
         }
 
         private void validateAggregations() {
+            logger.debug("Checking aggregation compatibility: User={} vs MV={}", userAggs, mvAggs);
+            
             // Filter aggregations to only consider those relevant to the target table
             Set<AggregationInfo> relevantUserAggs = userAggs.stream()
                 .map(this::filterAggregationToTargetTable)
                 .filter(agg -> agg != null) // Only keep non-null aggregations (null means no relevant args)
                 .collect(Collectors.toSet());
             
+            logger.debug("Relevant user aggregations after filtering: {}", relevantUserAggs);
+            
             Set<AggregationInfo> exactlyMissingAggs = relevantUserAggs.stream()
                 .filter(agg -> !mvAggs.contains(agg))
                 .collect(Collectors.toSet());
             
             if (exactlyMissingAggs.isEmpty()) {
+                logger.debug("Aggregation validation passed - all aggregations directly available");
                 return; // All aggregations are directly available
             }
+            
+            logger.debug("Missing aggregations: {}, checking if they can be computed", exactlyMissingAggs);
             
             // Check if missing aggregations can be computed from available MV columns
             Set<AggregationInfo> uncomputableAggs = exactlyMissingAggs.stream()
@@ -144,9 +173,11 @@ public class RewriteMatcher {
                 .collect(Collectors.toSet());
             
             if (!uncomputableAggs.isEmpty()) {
-                failures.add(String.format("Missing aggregations that cannot be computed: %s", uncomputableAggs));
+                String reason = String.format("Missing aggregations that cannot be computed: %s", uncomputableAggs);
+                failures.add(reason);
+                logger.debug("Aggregation validation failed: {}", reason);
             } else if (!exactlyMissingAggs.isEmpty()) {
-                logger.debug("The following aggregations can be computed from MV: {}", exactlyMissingAggs);
+                logger.debug("Aggregation validation passed - missing aggregations can be computed from MV: {}", exactlyMissingAggs);
             }
         }
         
@@ -232,20 +263,26 @@ public class RewriteMatcher {
 
         private void validateColumnAvailability() {
             if (originalTableSchema == null || originalTableSchema.getParsedSchema() == null) {
-                failures.add("Original table schema not available for column validation");
+                String reason = "Original table schema not available for column validation";
+                failures.add(reason);
+                logger.debug("Column validation failed: {}", reason);
                 return;
             }
 
-
-            logger.debug("Validating column availability...");
+            logger.debug("Checking column availability: User needs={} vs MV provides={}", userNeededColumns, mvAvailableColumns);
             Set<String> cleanedUserColumns = cleanUserColumns(userNeededColumns);
             Set<String> missingColumns = findMissingColumns(cleanedUserColumns, mvAvailableColumns);
-            //logger.debug("Cleaned user columns: {}", cleanedUserColumns);
-            //logger.debug("MV available columns: {}", mvAvailableColumns);
-
+            
+            logger.debug("Cleaned user columns: {}", cleanedUserColumns);
+            logger.debug("MV available columns: {}", mvAvailableColumns);
+            logger.debug("Missing columns after analysis: {}", missingColumns);
 
             if (!missingColumns.isEmpty()) {
-                failures.add(String.format("Missing essential columns: %s", missingColumns));
+                String reason = String.format("Missing essential columns: %s", missingColumns);
+                failures.add(reason);
+                logger.debug("Column validation failed: {}", reason);
+            } else {
+                logger.debug("Column validation passed - all required columns available");
             }
         }
 
