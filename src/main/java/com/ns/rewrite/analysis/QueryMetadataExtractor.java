@@ -52,7 +52,7 @@ public class QueryMetadataExtractor {
             primaryTable = findPrimaryTable(query.getQueryBody());
             collectAllTables(query.getQueryBody()); // Collects all base tables involved
             extractAllMetadata(query.getQueryBody()); // Extracts projections, filters, etc.
-            
+            //logger.info("cteColumnAliases: {}", cteColumnAliases);
             return buildMetadata();
         }
 
@@ -60,7 +60,6 @@ public class QueryMetadataExtractor {
             Map<String, String> contextMap = new HashMap<>();
             if (relation != null) {
                 populateSourceTableContext(relation, contextMap);
-                // logger.debug("Built source table context: {} for relation: {}", contextMap, relation.getClass().getSimpleName());
             }
             return contextMap;
         }
@@ -136,6 +135,7 @@ public class QueryMetadataExtractor {
                 with.getQueries().forEach(cte -> {
                     String cteName = cte.getName().getValue().toLowerCase();
                     cteMap.put(cteName, cte);
+                    //logger.info("cteMap populated with cteName: {} and cte: {}", cteName, cte);
                     extractCteColumnAliases(cteName, cte);
                 }));
         }
@@ -156,14 +156,14 @@ public class QueryMetadataExtractor {
                         if (singleColumn.getExpression() instanceof Identifier) {
                             String originalColumn = ((Identifier) singleColumn.getExpression()).getValue().toLowerCase();
                             columnAliases.put(aliasName, originalColumn);
-                            logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
+                            //logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
                         } else if (singleColumn.getExpression() instanceof DereferenceExpression) {
                             // Handle qualified column references like A.policy -> derived_policy
                             DereferenceExpression deref = (DereferenceExpression) singleColumn.getExpression();
                             if (deref.getBase() instanceof Identifier && deref.getField().isPresent()) {
                                 String originalColumn = deref.getField().get().getValue().toLowerCase();
                                 columnAliases.put(aliasName, originalColumn);
-                                logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
+                                //logger.debug("CTE '{}': alias '{}' -> column '{}'", cteName, aliasName, originalColumn);
                             }
                         }
                     });
@@ -271,7 +271,7 @@ public class QueryMetadataExtractor {
                         .map(MetadataExtractor.this::buildSourceTableContext)
                         .orElse(Collections.emptyMap());
 
-                    // logger.debug("Processing QuerySpecification with source table context: {}", sourceTableContext);
+                    //logger.info("Processing QuerySpecification with source table context: {}", sourceTableContext);
                     
                     Set<String> projections = extractProjections(spec, sourceTableContext);
                     Set<String> filters = extractFilters(spec, sourceTableContext);

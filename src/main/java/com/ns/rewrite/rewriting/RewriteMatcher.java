@@ -240,8 +240,8 @@ public class RewriteMatcher {
             logger.debug("Validating column availability...");
             Set<String> cleanedUserColumns = cleanUserColumns(userNeededColumns);
             Set<String> missingColumns = findMissingColumns(cleanedUserColumns, mvAvailableColumns);
-            logger.debug("Cleaned user columns: {}", cleanedUserColumns);
-            logger.debug("MV available columns: {}", mvAvailableColumns);
+            //logger.debug("Cleaned user columns: {}", cleanedUserColumns);
+            //logger.debug("MV available columns: {}", mvAvailableColumns);
 
 
             if (!missingColumns.isEmpty()) {
