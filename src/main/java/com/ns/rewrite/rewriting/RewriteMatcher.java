@@ -88,7 +88,8 @@ public class RewriteMatcher {
             
             this.userNeededColumns = combineColumns(
                 userMetadata.getFilterColumns(), 
-                userMetadata.getProjectionColumns()
+                userMetadata.getProjectionColumns(),
+                userMetadata.getJoinColumns()
             );
             this.mvAvailableColumns = combineColumns(
                 mvMetadata.getProjectionColumns(), 
@@ -269,7 +270,7 @@ public class RewriteMatcher {
                 return;
             }
 
-            logger.debug("Checking column availability: User needs={} vs MV provides={}", userNeededColumns, mvAvailableColumns);
+            logger.debug("Checking column availability: User needs={} (filters + projections + joins) vs MV provides={}", userNeededColumns, mvAvailableColumns);
             Set<String> cleanedUserColumns = cleanUserColumns(userNeededColumns);
             Set<String> missingColumns = findMissingColumns(cleanedUserColumns, mvAvailableColumns);
             
@@ -326,6 +327,14 @@ public class RewriteMatcher {
             Set<String> combined = new HashSet<>();
             combined.addAll(normalizeColumns(set1));
             combined.addAll(normalizeColumns(set2));
+            return combined;
+        }
+
+        private Set<String> combineColumns(Collection<String> set1, Collection<String> set2, Collection<String> set3) {
+            Set<String> combined = new HashSet<>();
+            combined.addAll(normalizeColumns(set1));
+            combined.addAll(normalizeColumns(set2));
+            combined.addAll(normalizeColumns(set3));
             return combined;
         }
 

@@ -23,16 +23,18 @@ public class QueryMetadataExtractor {
         MetadataExtractor extractor = new MetadataExtractor();
         QueryMetadata metadata = extractor.extract((Query) queryStatement);
         
-        logger.info("Metadata extraction completed for base table '{}' with {} projections, {} filters, {} aggregations", 
+        logger.info("Metadata extraction completed for base table '{}' with {} projections, {} filters, {} aggregations, {} join columns", 
             metadata.getBaseTable(), 
             metadata.getProjectionColumns().size(),
             metadata.getFilterColumns().size(), 
-            metadata.getAggregations().size());
+            metadata.getAggregations().size(),
+            metadata.getJoinColumns().size());
             
-        logger.debug("Detailed metadata - projections: {}, filters: {}, aggregations: {}", 
+        logger.debug("Detailed metadata - projections: {}, filters: {}, aggregations: {}, join columns: {}", 
             metadata.getProjectionColumns(),
             metadata.getFilterColumns(), 
-            metadata.getAggregations());
+            metadata.getAggregations(),
+            metadata.getJoinColumns());
         
         return metadata;
     }
@@ -45,6 +47,7 @@ public class QueryMetadataExtractor {
         private final Set<String> allFilters = new LinkedHashSet<>();
         private final Set<AggregationInfo> allAggregations = new LinkedHashSet<>();
         private final Set<String> allGroupBys = new LinkedHashSet<>();
+        private final Set<String> allJoinColumns = new LinkedHashSet<>();
         private final Set<String> discoveredBaseTables = new LinkedHashSet<>();
         
         private Map<String, WithQuery> cteMap = new HashMap<>();
@@ -171,7 +174,6 @@ public class QueryMetadataExtractor {
                     SingleColumn singleColumn = (SingleColumn) selectItem;
                     singleColumn.getAlias().ifPresent(alias -> {
                         String aliasName = alias.getValue().toLowerCase();
-                        String originalExpression = singleColumn.getExpression().toString().toLowerCase();
                         
                         // For simple column references, store the mapping
                         // More complex expressions (functions, etc.) could be handled later
@@ -209,6 +211,7 @@ public class QueryMetadataExtractor {
             metadata.setFilterColumns(new ArrayList<>(allFilters));
             metadata.setAggregations(new ArrayList<>(allAggregations));
             metadata.setGroupByColumns(new ArrayList<>(allGroupBys));
+            metadata.setJoinColumns(new ArrayList<>(allJoinColumns));
             
             return metadata;
         }
@@ -299,16 +302,19 @@ public class QueryMetadataExtractor {
                     Set<String> filters = extractFilters(spec, sourceTableContext);
                     Set<AggregationInfo> aggregations = extractAggregations(spec, sourceTableContext);
                     Set<String> groupBys = extractGroupBys(spec, sourceTableContext);
+                    Set<String> joinColumns = extractJoinColumns(spec, sourceTableContext);
                     
                     logger.debug("Extracted projections: {}", projections);
                     logger.debug("Extracted filters: {}", filters);
                     logger.debug("Extracted aggregations: {}", aggregations);
                     logger.debug("Extracted group by columns: {}", groupBys);
+                    logger.debug("Extracted join columns: {}", joinColumns);
                     
                     allProjections.addAll(projections);
                     allFilters.addAll(filters);
                     allAggregations.addAll(aggregations);
                     allGroupBys.addAll(groupBys);
+                    allJoinColumns.addAll(joinColumns);
 
                     return super.visitQuerySpecification(spec, context);
                 }
@@ -380,6 +386,16 @@ public class QueryMetadataExtractor {
                 .collect(Collectors.toSet());
         }
 
+
+        private Set<String> extractJoinColumns(QuerySpecification spec, Map<String, String> sourceTableContext) {
+            Set<String> joinColumns = new HashSet<>();
+            spec.getFrom().ifPresent(from -> {
+                JoinColumnExtractor extractor = new JoinColumnExtractor(sourceTableContext, cteColumnAliases, primaryTable);
+                extractor.process(from, null);
+                joinColumns.addAll(extractor.getJoinColumns());
+            });
+            return joinColumns;
+        }
 
         private Expression resolveOrdinalReference(Expression expr, List<SelectItem> selectItems) {
             if (expr instanceof LongLiteral) {
@@ -529,6 +545,61 @@ public class QueryMetadataExtractor {
                 // to find non-aggregated columns inside regular function calls.
                 node.getArguments().forEach(arg -> process(arg, context));
             }
+            return null;
+        }
+    }
+
+    /**
+     * Specialized visitor for extracting join columns from JOIN conditions.
+     */
+    private static class JoinColumnExtractor extends DefaultTraversalVisitor<Void> {
+        private final Set<String> joinColumns = new HashSet<>();
+        private final Map<String, String> sourceTableContext;
+        private final Map<String, Map<String, String>> cteColumnAliases;
+        private final TableInfo primaryTable;
+
+        JoinColumnExtractor(Map<String, String> sourceTableContext, Map<String, Map<String, String>> cteColumnAliases, TableInfo primaryTable) {
+            this.sourceTableContext = sourceTableContext != null ? sourceTableContext : Collections.emptyMap();
+            this.cteColumnAliases = cteColumnAliases != null ? cteColumnAliases : Collections.emptyMap();
+            this.primaryTable = primaryTable;
+        }
+
+        Set<String> getJoinColumns() {
+            return joinColumns;
+        }
+
+        @Override
+        protected Void visitJoin(Join node, Void context) {
+            logger.debug("Processing join: {}", node.getType());
+            
+            // Extract columns from the join condition
+            node.getCriteria().ifPresent(criteria -> {
+                if (criteria instanceof JoinOn) {
+                    JoinOn joinOn = (JoinOn) criteria;
+                    Expression condition = joinOn.getExpression();
+                    logger.debug("Extracting columns from join condition: {}", condition);
+                    
+                    // Extract all column references from the join condition
+                    IdentifierExtractor extractor = new IdentifierExtractor(sourceTableContext, cteColumnAliases);
+                    extractor.process(condition, null);
+                    Set<String> allColumns = extractor.getIdentifiers();
+                    
+                    // Filter to only keep columns that belong to the primary table
+                    if (primaryTable != null) {
+                        String primaryTableName = primaryTable.name.toLowerCase();
+                        Set<String> primaryTableColumns = allColumns.stream()
+                            .filter(col -> col.startsWith(primaryTableName + "."))
+                            .collect(Collectors.toSet());
+                        
+                        joinColumns.addAll(primaryTableColumns);
+                        logger.debug("Found join columns for primary table '{}': {}", primaryTableName, primaryTableColumns);
+                    }
+                }
+            });
+            
+            // Continue processing child relations
+            process(node.getLeft(), context);
+            process(node.getRight(), context);
             return null;
         }
     }

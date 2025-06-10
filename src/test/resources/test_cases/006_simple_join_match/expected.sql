@@ -5,7 +5,7 @@ SELECT
   SUM(a."count") total_count
 FROM
   (
-    redshift_poc_iceberg.alert_event_daily_sum a
+    redshift_poc_iceberg.alert_event_daily_sum_detailed a
     INNER JOIN "redshift_poc_iceberg"."policy_details" d ON (a.policy = d.policy_name)
   )
 WHERE

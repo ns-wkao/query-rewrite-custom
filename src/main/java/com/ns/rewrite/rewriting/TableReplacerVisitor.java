@@ -12,6 +12,7 @@ import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Relation;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
+import io.trino.sql.tree.Unnest;
 import io.trino.sql.tree.With;
 import io.trino.sql.tree.WithQuery;
 import org.slf4j.Logger;
@@ -220,7 +221,9 @@ public class TableReplacerVisitor extends AstVisitor<Node, Void> {
         
         Relation relation = node.getRelation();
         Relation newRelation = (Relation) process(relation, context);
-        if (newRelation != relation) {
+        
+        // Check if the relation was actually modified and is not null
+        if (newRelation != relation && newRelation != null) {
             this.changed = true;
             logger.debug("Aliased relation '{}' was modified during transformation", node.getAlias().getValue());
             
@@ -243,6 +246,8 @@ public class TableReplacerVisitor extends AstVisitor<Node, Void> {
                 logger.error("Failed to reconstruct aliased relation '{}': {}", node.getAlias().getValue(), e.getMessage(), e);
                 throw e;
             }
+        } else if (newRelation == null) {
+            logger.debug("Aliased relation '{}' processing returned null - keeping original", node.getAlias().getValue());
         }
         return node;
     }
@@ -295,6 +300,14 @@ public class TableReplacerVisitor extends AstVisitor<Node, Void> {
                 return new TableSubquery(newQuery);
             }
         }
+        return node;
+    }
+    
+    @Override
+    protected Node visitUnnest(Unnest node, Void context) {
+        // UNNEST is a table-valued function, not a table reference
+        // We never want to replace UNNEST functions, so just return the node unchanged
+        logger.debug("Processing UNNEST function - keeping unchanged");
         return node;
     }
     

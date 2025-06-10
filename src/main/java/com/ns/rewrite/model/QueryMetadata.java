@@ -12,6 +12,7 @@ public class QueryMetadata {
     private List<AggregationInfo> aggregations = new ArrayList<>();
     private List<String> groupByColumns = new ArrayList<>();
     private List<String> filterColumns = new ArrayList<>();
+    private List<String> joinColumns = new ArrayList<>();
     private List<String> allBaseTables = new ArrayList<>();
 
     // Getters and setters
@@ -61,6 +62,14 @@ public class QueryMetadata {
 
     public void setFilterColumns(List<String> filterColumns) {
         this.filterColumns = filterColumns;
+    }
+
+    public List<String> getJoinColumns() {
+        return joinColumns;
+    }
+
+    public void setJoinColumns(List<String> joinColumns) {
+        this.joinColumns = joinColumns;
     }
 
     public List<String> getAllBaseTables() {
