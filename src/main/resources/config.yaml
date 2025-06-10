@@ -7,6 +7,7 @@ tables:
       - organization_unit: VARCHAR
       - appcategory: VARCHAR
       - app: VARCHAR
+      - user: VARCHAR
       - instance_id: VARCHAR
       - timestamp: TIMESTAMP
       - url: VARCHAR
@@ -18,6 +19,7 @@ tables:
       - malware_name: VARCHAR
       - site: VARCHAR
       - dlp_rule_severity: VARCHAR
+      - ns_id: INTEGER
       - ns_tenant_id: INTEGER
       - ns_creation_timestamp: TIMESTAMP
       - signature_id: INTEGER
@@ -30,6 +32,7 @@ tables:
       - ur_normalized: VARCHAR
       - timestamp: TIMESTAMP
       - ns_tenant_id: INTEGER
+      - user: VARCHAR
       - ns_category_id: INTEGER
       - count: INTEGER
       - site: VARCHAR
