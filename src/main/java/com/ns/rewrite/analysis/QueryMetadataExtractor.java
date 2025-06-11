@@ -396,7 +396,8 @@ public class QueryMetadataExtractor {
                 if (ge instanceof SimpleGroupBy) {
                     for (Expression expr : ((SimpleGroupBy) ge).getExpressions()) {
                         Expression resolvedExpr = resolveOrdinalReference(expr, selectItems);
-                        
+                        logger.debug("Resolved GROUP BY expression type: {}", resolvedExpr.getClass().getSimpleName());
+                        logger.debug("Resolved GROUP BY expression content: {}", resolvedExpr);
                         // Analyze for temporal granularity
                         TimeGranularity granularity = temporalAnalyzer.extractGranularity(resolvedExpr);
                         if (granularity != TimeGranularity.UNKNOWN) {

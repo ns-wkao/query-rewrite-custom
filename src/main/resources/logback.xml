@@ -12,6 +12,7 @@
     <!-- Main application classes - default to INFO, can be overridden -->
     <logger name="com.ns.rewrite.SQLRewriter" level="${com.ns.rewrite.SQLRewriter:-INFO}" />
     <logger name="com.ns.rewrite.analysis.QueryMetadataExtractor" level="${com.ns.rewrite.analysis.QueryMetadataExtractor:-INFO}" />
+    <logger name="com.ns.rewrite.analysis.TemporalGranularityAnalyzer" level="${com.ns.rewrite.analysis.TemporalGranularityAnalyzer:-INFO}" />
     <logger name="com.ns.rewrite.rewriting.RewriteMatcher" level="${com.ns.rewrite.rewriting.RewriteMatcher:-INFO}" />
     <logger name="com.ns.rewrite.rewriting.TableReplacerVisitor" level="${com.ns.rewrite.rewriting.TableReplacerVisitor:-INFO}" />
     
