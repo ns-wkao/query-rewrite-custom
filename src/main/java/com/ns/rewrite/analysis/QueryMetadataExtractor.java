@@ -54,7 +54,7 @@ public class QueryMetadataExtractor {
         private final Set<String> discoveredBaseTables = new LinkedHashSet<>();
         
         // Temporal analysis fields
-        private TimeGranularity temporalGranularity = TimeGranularity.UNKNOWN;
+        private TimeGranularity temporalGranularity = TimeGranularity.NONE;
         private final Set<String> temporalGroupByColumns = new LinkedHashSet<>();
         private final TemporalGranularityAnalyzer temporalAnalyzer = new TemporalGranularityAnalyzer();
         
@@ -400,11 +400,11 @@ public class QueryMetadataExtractor {
                         logger.debug("Resolved GROUP BY expression content: {}", resolvedExpr);
                         // Analyze for temporal granularity
                         TimeGranularity granularity = temporalAnalyzer.extractGranularity(resolvedExpr);
-                        if (granularity != TimeGranularity.UNKNOWN) {
+                        if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
                             logger.debug("Found temporal GROUP BY expression with granularity {}: {}", granularity, resolvedExpr);
                             
                             // Update the overall temporal granularity (keep the finest)
-                            if (temporalGranularity == TimeGranularity.UNKNOWN || 
+                            if (temporalGranularity == TimeGranularity.NONE || 
                                 granularity.isFinnerThan(temporalGranularity)) {
                                 temporalGranularity = granularity;
                                 logger.debug("Updated overall temporal granularity to: {}", temporalGranularity);

@@ -36,6 +36,9 @@ tables:
       - ns_category_id: INTEGER
       - count: INTEGER
       - site: VARCHAR
+      - numbytes: INTEGER
+      - client_bytes: INTEGER
+      - server_bytes: INTEGER
 
   'redshift_poc_iceberg.appcategory':
     schema:
@@ -133,6 +136,40 @@ materializedViews:
         alert_type,
         action
     targetTable: redshift_poc_iceberg.alert_event_hourly_sum
+
+  MV_PAGE_EVENT_30MIN_AGG:
+    definition: >
+      SELECT
+        from_unixtime(
+          CAST(floor(to_unixtime(timestamp) / 1800) AS BIGINT) * 1800
+        ) AS timestamp,
+        app,
+        ns_tenant_id,
+        ns_category_id,
+        organization_unit,
+        ur_normalized,
+        appcategory,
+        site,
+        user,
+        SUM("count") AS count,
+        SUM(numbytes) AS numbytes,
+        SUM(client_bytes) AS client_bytes,
+        SUM(server_bytes) AS server_bytes
+      FROM
+        "redshift_poc_iceberg"."page_v3"
+      GROUP BY
+        from_unixtime(
+          CAST(floor(to_unixtime(timestamp) / 1800) AS BIGINT) * 1800
+        ),
+        app,
+        ns_tenant_id,
+        ns_category_id,
+        organization_unit,
+        ur_normalized,
+        appcategory,
+        site,
+        user
+    targetTable: redshift_poc_iceberg.page_event_30min_sum
 
   MV_PAGE_EVENT_DAILY_AGG_DETAILED:
     definition: >

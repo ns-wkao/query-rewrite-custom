@@ -4,7 +4,7 @@ WITH
       A.*,
       SPLIT(A.organization_unit, '/') OU
     FROM
-      redshift_poc_iceberg.page_event_daily_sum A
+      redshift_poc_iceberg.page_event_30min_sum A
     WHERE
       (
         (A.ns_tenant_id = 2683)

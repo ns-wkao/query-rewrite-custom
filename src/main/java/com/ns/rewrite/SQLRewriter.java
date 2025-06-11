@@ -60,7 +60,7 @@ public class SQLRewriter {
                         return;
                     }
                     mvMetadataMap.put(mvName, metadata);
-                    logger.info("Loaded MV '{}': baseTable={}", mvName, metadata.getBaseTable());
+                    logger.info("Finished loading MV '{}': baseTable={}", mvName, metadata.getBaseTable());
                 } catch (ParsingException | IllegalArgumentException e) {
                     logger.error("Failed to load or parse MV '{}': {}", mvName, e.getMessage(), e);
                 } catch (Exception e) {
