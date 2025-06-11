@@ -58,27 +58,28 @@ materializedViews:
       GROUP BY ns_tenant_id, alert_type
     targetTable: poc_mvs.mv_simple_agg
 
-  MV_ALERT_EVENT_DAILY_AGG:
+  MV_ALERT_EVENT_WEEKLY_AGG:
     definition: >
       SELECT
-        date_trunc('day', timestamp)  AS timestamp,
-        action,
-        ns_tenant_id,
-        alert_type,
-        SPLIT(organization_unit, '/') AS OU,
-        CONCAT(app, instance_id) AS ns_app_instance,
-        SUM("count")   AS count
+        date_trunc('week', timestamp) AS timestamp,
+        ns_id,
+        organization_unit,
+        appcategory,
+        malware_name,
+        site,
+        SUM("count") AS count,
+        SUM(numbytes) AS numbytes
       FROM
         "redshift_poc_iceberg"."alert_v3"
       GROUP BY
-        date_trunc('day', timestamp),
-        action,
-        ns_tenant_id,
-        alert_type,
-        SPLIT(organization_unit, '/'),
-        CONCAT(app, instance_id)
-    targetTable: redshift_poc_iceberg.alert_event_daily_sum
-
+        date_trunc('week', timestamp),
+        ns_id,
+        organization_unit,
+        appcategory,
+        malware_name,
+        site
+    targetTable: redshift_poc_iceberg.alert_event_weekly_sum
+    
   MV_ALERT_EVENT_DAILY_AGG_DETAILED:
     definition: >
       SELECT
@@ -115,6 +116,23 @@ materializedViews:
         site,
         dlp_rule_severity
     targetTable: redshift_poc_iceberg.alert_event_daily_sum_detailed
+
+  MV_ALERT_EVENT_HOURLY_AGG:
+    definition: >
+      SELECT
+        date_trunc('hour', timestamp) AS timestamp,
+        ns_tenant_id,
+        alert_type,
+        action,
+        SUM("count") AS count
+      FROM
+        "redshift_poc_iceberg"."alert_v3"
+      GROUP BY
+        date_trunc('hour', timestamp),
+        ns_tenant_id,
+        alert_type,
+        action
+    targetTable: redshift_poc_iceberg.alert_event_hourly_sum
 
   MV_PAGE_EVENT_DAILY_AGG_DETAILED:
     definition: >

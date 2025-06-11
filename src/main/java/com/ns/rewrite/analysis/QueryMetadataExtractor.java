@@ -4,6 +4,7 @@ import io.trino.sql.tree.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.ns.rewrite.analysis.TemporalGranularityAnalyzer.TimeGranularity;
 import com.ns.rewrite.model.AggregationInfo;
 import com.ns.rewrite.model.QueryMetadata;
 
@@ -23,18 +24,20 @@ public class QueryMetadataExtractor {
         MetadataExtractor extractor = new MetadataExtractor();
         QueryMetadata metadata = extractor.extract((Query) queryStatement);
         
-        logger.info("Metadata extraction completed for base table '{}' with {} projections, {} filters, {} aggregations, {} join columns", 
+        logger.info("Metadata extraction completed for base table '{}' with {} projections, {} filters, {} aggregations, {} join columns, temporal granularity: {}", 
             metadata.getBaseTable(), 
             metadata.getProjectionColumns().size(),
             metadata.getFilterColumns().size(), 
             metadata.getAggregations().size(),
-            metadata.getJoinColumns().size());
+            metadata.getJoinColumns().size(),
+            metadata.getTemporalGranularity());
             
-        logger.debug("Detailed metadata - projections: {}, filters: {}, aggregations: {}, join columns: {}", 
+        logger.debug("Detailed metadata - projections: {}, filters: {}, aggregations: {}, join columns: {}, temporal columns: {}", 
             metadata.getProjectionColumns(),
             metadata.getFilterColumns(), 
             metadata.getAggregations(),
-            metadata.getJoinColumns());
+            metadata.getJoinColumns(),
+            metadata.getTemporalGroupByColumns());
         
         return metadata;
     }
@@ -49,6 +52,11 @@ public class QueryMetadataExtractor {
         private final Set<String> allGroupBys = new LinkedHashSet<>();
         private final Set<String> allJoinColumns = new LinkedHashSet<>();
         private final Set<String> discoveredBaseTables = new LinkedHashSet<>();
+        
+        // Temporal analysis fields
+        private TimeGranularity temporalGranularity = TimeGranularity.UNKNOWN;
+        private final Set<String> temporalGroupByColumns = new LinkedHashSet<>();
+        private final TemporalGranularityAnalyzer temporalAnalyzer = new TemporalGranularityAnalyzer();
         
         private Map<String, WithQuery> cteMap = new HashMap<>();
         private Map<String, Map<String, String>> cteColumnAliases = new HashMap<>(); // CTE name -> (alias -> original column)
@@ -212,6 +220,8 @@ public class QueryMetadataExtractor {
             metadata.setAggregations(new ArrayList<>(allAggregations));
             metadata.setGroupByColumns(new ArrayList<>(allGroupBys));
             metadata.setJoinColumns(new ArrayList<>(allJoinColumns));
+            metadata.setTemporalGranularity(temporalGranularity);
+            metadata.setTemporalGroupByColumns(new ArrayList<>(temporalGroupByColumns));
             
             return metadata;
         }
@@ -377,13 +387,41 @@ public class QueryMetadataExtractor {
             if (!spec.getGroupBy().isPresent()) {
                 return new HashSet<>();
             }
+            
             List<SelectItem> selectItems = spec.getSelect().getSelectItems();
-            return spec.getGroupBy().get().getGroupingElements().stream()
-                .filter(ge -> ge instanceof SimpleGroupBy)
-                .flatMap(ge -> ((SimpleGroupBy) ge).getExpressions().stream())
-                .map(expr -> resolveOrdinalReference(expr, selectItems))
-                .flatMap(expr -> extractIdentifiersFromExpression(expr, sourceTableContext).stream())
-                .collect(Collectors.toSet());
+            Set<String> groupByColumns = new HashSet<>();
+            
+            // Process each GROUP BY expression
+            for (GroupingElement ge : spec.getGroupBy().get().getGroupingElements()) {
+                if (ge instanceof SimpleGroupBy) {
+                    for (Expression expr : ((SimpleGroupBy) ge).getExpressions()) {
+                        Expression resolvedExpr = resolveOrdinalReference(expr, selectItems);
+                        
+                        // Analyze for temporal granularity
+                        TimeGranularity granularity = temporalAnalyzer.extractGranularity(resolvedExpr);
+                        if (granularity != TimeGranularity.UNKNOWN) {
+                            logger.debug("Found temporal GROUP BY expression with granularity {}: {}", granularity, resolvedExpr);
+                            
+                            // Update the overall temporal granularity (keep the finest)
+                            if (temporalGranularity == TimeGranularity.UNKNOWN || 
+                                granularity.isFinnerThan(temporalGranularity)) {
+                                temporalGranularity = granularity;
+                                logger.debug("Updated overall temporal granularity to: {}", temporalGranularity);
+                            }
+                            
+                            // Extract column identifiers from the temporal expression
+                            Set<String> temporalColumns = extractIdentifiersFromExpression(resolvedExpr, sourceTableContext);
+                            temporalGroupByColumns.addAll(temporalColumns);
+                        }
+                        
+                        // Extract regular column identifiers
+                        Set<String> columns = extractIdentifiersFromExpression(resolvedExpr, sourceTableContext);
+                        groupByColumns.addAll(columns);
+                    }
+                }
+            }
+            
+            return groupByColumns;
         }
 
 

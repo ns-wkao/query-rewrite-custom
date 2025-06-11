@@ -1,6 +1,7 @@
 // File: src/main/java/com/ns/rewrite/model/QueryMetadata.java
 package com.ns.rewrite.model;
 
+import com.ns.rewrite.analysis.TemporalGranularityAnalyzer.TimeGranularity;
 import java.util.List;
 import java.util.Optional;
 import java.util.ArrayList;
@@ -14,6 +15,10 @@ public class QueryMetadata {
     private List<String> filterColumns = new ArrayList<>();
     private List<String> joinColumns = new ArrayList<>();
     private List<String> allBaseTables = new ArrayList<>();
+    
+    // Temporal granularity information
+    private TimeGranularity temporalGranularity = TimeGranularity.UNKNOWN;
+    private List<String> temporalGroupByColumns = new ArrayList<>();
 
     // Getters and setters
     public String getBaseTable() {
@@ -78,5 +83,21 @@ public class QueryMetadata {
 
     public void setAllBaseTables(List<String> allBaseTables) {
         this.allBaseTables = allBaseTables;
+    }
+
+    public TimeGranularity getTemporalGranularity() {
+        return temporalGranularity;
+    }
+
+    public void setTemporalGranularity(TimeGranularity temporalGranularity) {
+        this.temporalGranularity = temporalGranularity != null ? temporalGranularity : TimeGranularity.UNKNOWN;
+    }
+
+    public List<String> getTemporalGroupByColumns() {
+        return temporalGroupByColumns;
+    }
+
+    public void setTemporalGroupByColumns(List<String> temporalGroupByColumns) {
+        this.temporalGroupByColumns = temporalGroupByColumns != null ? temporalGroupByColumns : new ArrayList<>();
     }
 }

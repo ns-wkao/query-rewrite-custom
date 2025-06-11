@@ -3,10 +3,10 @@ package com.ns.rewrite.rewriting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.ns.rewrite.analysis.TemporalGranularityAnalyzer;
 import com.ns.rewrite.config.TableDefinition;
 import com.ns.rewrite.model.AggregationInfo;
 import com.ns.rewrite.model.QueryMetadata;
-import com.ns.rewrite.config.ColumnDefinition;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -111,6 +111,9 @@ public class RewriteMatcher {
             
             logger.debug("Validating column availability");
             validateColumnAvailability();
+            
+            logger.debug("Validating temporal granularity compatibility");
+            validateTemporalGranularity();
             
             if (failures.isEmpty()) {
                 logger.debug("All validation checks passed for table '{}'", targetTableName);
@@ -315,6 +318,47 @@ public class RewriteMatcher {
             // Check if this column exists in the base table schema
             return originalTableSchema.getParsedSchema().stream()
                 .anyMatch(colDef -> colDef.getName().toLowerCase().equals(columnName));
+        }
+
+        private void validateTemporalGranularity() {
+            TemporalGranularityAnalyzer.TimeGranularity userGranularity = userMetadata.getTemporalGranularity();
+            TemporalGranularityAnalyzer.TimeGranularity mvGranularity = mvMetadata.getTemporalGranularity();
+            
+            // If neither query has temporal granularity, validation passes
+            if (userGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
+                mvGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
+                logger.debug("No temporal granularity found in either user query or MV - validation passed");
+                return;
+            }
+            
+            // If only user query has temporal granularity, MV cannot satisfy
+            if (userGranularity != TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
+                mvGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
+                String reason = String.format("User query requires temporal granularity (%s) but MV has no temporal grouping", 
+                                             userGranularity);
+                failures.add(reason);
+                logger.debug("Temporal validation failed: {}", reason);
+                return;
+            }
+            
+            // If only MV has temporal granularity, it can still satisfy non-temporal queries
+            if (userGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
+                mvGranularity != TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
+                logger.debug("MV has temporal granularity ({}) but user query doesn't require it - validation passed", mvGranularity);
+                return;
+            }
+            
+            // Both have temporal granularity - check compatibility
+            TemporalGranularityAnalyzer analyzer = new TemporalGranularityAnalyzer();
+            if (!analyzer.canMvSatisfyQuery(mvGranularity, userGranularity)) {
+                String reason = String.format("MV temporal granularity (%s) is too coarse for user query granularity (%s)", 
+                                             mvGranularity, userGranularity);
+                failures.add(reason);
+                logger.debug("Temporal validation failed: {}", reason);
+            } else {
+                logger.debug("Temporal validation passed: MV granularity ({}) can satisfy user query granularity ({})", 
+                           mvGranularity, userGranularity);
+            }
         }
 
         private Set<String> cleanUserColumns(Set<String> columns) {
