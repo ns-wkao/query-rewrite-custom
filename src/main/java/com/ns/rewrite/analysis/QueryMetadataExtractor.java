@@ -24,13 +24,15 @@ public class QueryMetadataExtractor {
         MetadataExtractor extractor = new MetadataExtractor();
         QueryMetadata metadata = extractor.extract((Query) queryStatement);
         
-        logger.info("Metadata extraction completed for base table '{}' with {} projections, {} filters, {} aggregations, {} join columns, temporal granularity: {}", 
+        logger.info("Metadata extraction completed for base table '{}' with {} projections, {} filters, {} aggregations, {} join columns, GROUP BY granularity: {}, filter granularity: {}, minimum required: {}", 
             metadata.getBaseTable(), 
             metadata.getProjectionColumns().size(),
             metadata.getFilterColumns().size(), 
             metadata.getAggregations().size(),
             metadata.getJoinColumns().size(),
-            metadata.getTemporalGranularity());
+            metadata.getTemporalGranularity(),
+            metadata.getFilterGranularity(),
+            metadata.getMinimumRequiredGranularity());
             
         logger.debug("Detailed metadata - projections: {}, filters: {}, aggregations: {}, join columns: {}, temporal columns: {}", 
             metadata.getProjectionColumns(),
@@ -57,6 +59,10 @@ public class QueryMetadataExtractor {
         private TimeGranularity temporalGranularity = TimeGranularity.NONE;
         private final Set<String> temporalGroupByColumns = new LinkedHashSet<>();
         private final TemporalGranularityAnalyzer temporalAnalyzer = new TemporalGranularityAnalyzer();
+        
+        // Filter temporal analysis fields
+        private TimeGranularity filterGranularity = TimeGranularity.NONE;
+        private final Set<String> temporalFilterColumns = new LinkedHashSet<>();
         
         private Map<String, WithQuery> cteMap = new HashMap<>();
         private Map<String, Map<String, String>> cteColumnAliases = new HashMap<>(); // CTE name -> (alias -> original column)
@@ -223,7 +229,48 @@ public class QueryMetadataExtractor {
             metadata.setTemporalGranularity(temporalGranularity);
             metadata.setTemporalGroupByColumns(new ArrayList<>(temporalGroupByColumns));
             
+            // NEW: Set filter granularity and temporal filter columns
+            metadata.setFilterGranularity(filterGranularity);
+            metadata.setTemporalFilterColumns(new ArrayList<>(temporalFilterColumns));
+            
+            // NEW: Calculate minimum required granularity (finest of GROUP BY and filter requirements)
+            TimeGranularity combinedGranularity = calculateMinimumRequiredGranularity(
+                temporalGranularity,  // From GROUP BY
+                filterGranularity     // From WHERE clause
+            );
+            metadata.setMinimumRequiredGranularity(combinedGranularity);
+            
+            logger.debug("Combined temporal requirements: GROUP BY({}) + Filter({}) = Minimum Required({})", 
+                temporalGranularity, filterGranularity, combinedGranularity);
+            
             return metadata;
+        }
+        
+        /**
+         * Calculates the minimum required granularity by combining GROUP BY and filter requirements.
+         * Returns the finest (most precise) granularity needed to satisfy both requirements.
+         */
+        private TimeGranularity calculateMinimumRequiredGranularity(TimeGranularity groupByGranularity, TimeGranularity filterGranularity) {
+            // Handle UNKNOWN - reject if either requirement is unknown
+            if (groupByGranularity.equals(TimeGranularity.UNKNOWN) || filterGranularity.equals(TimeGranularity.UNKNOWN)) {
+                return TimeGranularity.UNKNOWN;
+            }
+            
+            // Handle NONE cases
+            if (groupByGranularity.equals(TimeGranularity.NONE) && filterGranularity.equals(TimeGranularity.NONE)) {
+                return TimeGranularity.NONE; // No temporal requirements at all
+            }
+            
+            if (groupByGranularity.equals(TimeGranularity.NONE)) {
+                return filterGranularity; // Only filter has requirements
+            }
+            
+            if (filterGranularity.equals(TimeGranularity.NONE)) {
+                return groupByGranularity; // Only GROUP BY has requirements
+            }
+            
+            // Both have temporal requirements - return the finest (most precise)
+            return groupByGranularity.isFinnerThan(filterGranularity) ? groupByGranularity : filterGranularity;
         }
 
         private List<String> cleanProjections() {
@@ -368,7 +415,24 @@ public class QueryMetadataExtractor {
 
         private Set<String> extractFilters(QuerySpecification spec, Map<String, String> sourceTableContext) {
             return spec.getWhere()
-                .map(where -> extractIdentifiersFromExpression(where, sourceTableContext))
+                .map(where -> {
+                    // Existing column extraction logic
+                    Set<String> filterColumns = extractIdentifiersFromExpression(where, sourceTableContext);
+                    
+                    // NEW: Extract temporal filter requirements
+                    TimeGranularity filterGranularityRequirement = temporalAnalyzer.extractFilterGranularity(where);
+                    this.filterGranularity = filterGranularityRequirement;
+                    logger.debug("Extracted filter granularity requirement: {}", filterGranularityRequirement);
+                    
+                    // NEW: Extract temporal filter columns if there are temporal requirements
+                    if (filterGranularityRequirement != TimeGranularity.NONE && filterGranularityRequirement != TimeGranularity.UNKNOWN) {
+                        Set<String> temporalFilterCols = extractTemporalFilterColumns(where, sourceTableContext);
+                        this.temporalFilterColumns.addAll(temporalFilterCols);
+                        logger.debug("Extracted temporal filter columns: {}", temporalFilterCols);
+                    }
+                    
+                    return filterColumns;
+                })
                 .orElse(new HashSet<>());
         }
 
@@ -434,6 +498,16 @@ public class QueryMetadataExtractor {
                 joinColumns.addAll(extractor.getJoinColumns());
             });
             return joinColumns;
+        }
+        
+        /**
+         * Extracts temporal filter columns from WHERE clause expressions.
+         * Identifies columns that are involved in temporal filtering operations.
+         */
+        private Set<String> extractTemporalFilterColumns(Expression where, Map<String, String> sourceTableContext) {
+            // For now, use the same identifier extraction logic as regular filters
+            // This could be enhanced to specifically target temporal column references
+            return extractIdentifiersFromExpression(where, sourceTableContext);
         }
 
         private Expression resolveOrdinalReference(Expression expr, List<SelectItem> selectItems) {

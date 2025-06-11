@@ -321,43 +321,44 @@ public class RewriteMatcher {
         }
 
         private void validateTemporalGranularity() {
-            TemporalGranularityAnalyzer.TimeGranularity userGranularity = userMetadata.getTemporalGranularity();
-            TemporalGranularityAnalyzer.TimeGranularity mvGranularity = mvMetadata.getTemporalGranularity();
+            // Use the combined minimum required granularity instead of just GROUP BY granularity
+            TemporalGranularityAnalyzer.TimeGranularity userRequiredGranularity = userMetadata.getMinimumRequiredGranularity();
+            TemporalGranularityAnalyzer.TimeGranularity mvRequiredGranularity = mvMetadata.getMinimumRequiredGranularity();
             
-            // If neither query has temporal granularity, validation passes
-            if (userGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
-                mvGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
-                logger.debug("No temporal granularity found in either user query or MV - validation passed");
+            // If neither query has temporal requirements, validation passes
+            if (userRequiredGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
+                mvRequiredGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
+                logger.debug("No temporal requirements found in either user query or MV - validation passed");
                 return;
             }
             
-            // If only user query has temporal granularity, MV cannot satisfy
-            if (userGranularity != TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
-                mvGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
-                String reason = String.format("User query requires temporal granularity (%s) but MV has no temporal grouping", 
-                                             userGranularity);
+            // If only user query has temporal requirements, MV cannot satisfy
+            if (userRequiredGranularity != TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
+                mvRequiredGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
+                String reason = String.format("User query requires temporal granularity (%s) but MV has no temporal requirements", 
+                                             userRequiredGranularity);
                 failures.add(reason);
                 logger.debug("Temporal validation failed: {}", reason);
                 return;
             }
             
-            // If only MV has temporal granularity, it can still satisfy non-temporal queries
-            if (userGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
-                mvGranularity != TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
-                logger.debug("MV has temporal granularity ({}) but user query doesn't require it - validation passed", mvGranularity);
+            // If only MV has temporal requirements, it can still satisfy non-temporal queries
+            if (userRequiredGranularity == TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN &&
+                mvRequiredGranularity != TemporalGranularityAnalyzer.TimeGranularity.UNKNOWN) {
+                logger.debug("MV has temporal requirements ({}) but user query doesn't require any - validation passed", mvRequiredGranularity);
                 return;
             }
             
-            // Both have temporal granularity - check compatibility
+            // Both have temporal requirements - check compatibility
             TemporalGranularityAnalyzer analyzer = new TemporalGranularityAnalyzer();
-            if (!analyzer.canMvSatisfyQuery(mvGranularity, userGranularity)) {
-                String reason = String.format("MV temporal granularity (%s) is too coarse for user query granularity (%s)", 
-                                             mvGranularity, userGranularity);
+            if (!analyzer.canMvSatisfyQuery(mvRequiredGranularity, userRequiredGranularity)) {
+                String reason = String.format("MV temporal granularity (%s) is too coarse for user query requirements (%s)", 
+                                             mvRequiredGranularity, userRequiredGranularity);
                 failures.add(reason);
                 logger.debug("Temporal validation failed: {}", reason);
             } else {
-                logger.debug("Temporal validation passed: MV granularity ({}) can satisfy user query granularity ({})", 
-                           mvGranularity, userGranularity);
+                logger.debug("Temporal validation passed: MV granularity ({}) can satisfy user query requirements ({})", 
+                           mvRequiredGranularity, userRequiredGranularity);
             }
         }
 

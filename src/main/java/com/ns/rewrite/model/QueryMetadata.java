@@ -19,6 +19,11 @@ public class QueryMetadata {
     // Temporal granularity information
     private TimeGranularity temporalGranularity = TimeGranularity.UNKNOWN;
     private List<String> temporalGroupByColumns = new ArrayList<>();
+    
+    // Filter temporal requirements
+    private TimeGranularity filterGranularity = TimeGranularity.NONE;
+    private TimeGranularity minimumRequiredGranularity = TimeGranularity.NONE;
+    private List<String> temporalFilterColumns = new ArrayList<>();
 
     // Getters and setters
     public String getBaseTable() {
@@ -99,5 +104,29 @@ public class QueryMetadata {
 
     public void setTemporalGroupByColumns(List<String> temporalGroupByColumns) {
         this.temporalGroupByColumns = temporalGroupByColumns != null ? temporalGroupByColumns : new ArrayList<>();
+    }
+
+    public TimeGranularity getFilterGranularity() {
+        return filterGranularity;
+    }
+
+    public void setFilterGranularity(TimeGranularity filterGranularity) {
+        this.filterGranularity = filterGranularity != null ? filterGranularity : TimeGranularity.NONE;
+    }
+
+    public TimeGranularity getMinimumRequiredGranularity() {
+        return minimumRequiredGranularity;
+    }
+
+    public void setMinimumRequiredGranularity(TimeGranularity minimumRequiredGranularity) {
+        this.minimumRequiredGranularity = minimumRequiredGranularity != null ? minimumRequiredGranularity : TimeGranularity.NONE;
+    }
+
+    public List<String> getTemporalFilterColumns() {
+        return temporalFilterColumns;
+    }
+
+    public void setTemporalFilterColumns(List<String> temporalFilterColumns) {
+        this.temporalFilterColumns = temporalFilterColumns != null ? temporalFilterColumns : new ArrayList<>();
     }
 }

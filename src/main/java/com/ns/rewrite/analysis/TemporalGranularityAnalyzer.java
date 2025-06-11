@@ -6,6 +6,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Arrays;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 /**
  * Analyzes temporal granularity in SQL expressions, particularly date_trunc function calls.
@@ -243,6 +246,54 @@ public class TemporalGranularityAnalyzer {
             return Long.hashCode(milliseconds);
         }
     }
+    
+    /**
+     * Represents a temporal pattern for detecting timestamp literals in SQL expressions.
+     */
+    private static class TemporalPattern {
+        private final Pattern pattern;
+        private final int timestampGroup;
+        private final String description;
+        
+        public TemporalPattern(String regex, int timestampGroup, String description) {
+            this.pattern = Pattern.compile(regex, Pattern.CASE_INSENSITIVE);
+            this.timestampGroup = timestampGroup;
+            this.description = description;
+        }
+        
+        public Matcher matcher(String input) {
+            return pattern.matcher(input);
+        }
+        
+        public String extractTimestamp(Matcher matcher) {
+            return matcher.group(timestampGroup);
+        }
+        
+        public String getDescription() {
+            return description;
+        }
+    }
+    
+    /**
+     * Registry of temporal patterns for detecting various timestamp literal formats.
+     * Easily extensible without modifying core logic.
+     */
+    private static final List<TemporalPattern> TEMPORAL_PATTERNS = Arrays.asList(
+        // TIMESTAMP 'YYYY-MM-DD...' format
+        new TemporalPattern("TIMESTAMP\\s+'([^']+)'", 1, "TIMESTAMP literal"),
+        
+        // DATE 'YYYY-MM-DD' format  
+        new TemporalPattern("DATE\\s+'([^']+)'", 1, "DATE literal"),
+        
+        // TIME 'HH:MM:SS' format
+        new TemporalPattern("TIME\\s+'([^']+)'", 1, "TIME literal"),
+        
+        // Direct quoted timestamp strings
+        new TemporalPattern("'(\\d{4}-\\d{2}-\\d{2}[^']*)'", 1, "Quoted timestamp string"),
+        
+        // ISO timestamp format without quotes (as fallback)
+        new TemporalPattern("(\\d{4}-\\d{2}-\\d{2}(?:[T\\s]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?)?)", 1, "ISO timestamp")
+    );
     
     /**
      * Extracts temporal granularity from a SQL expression.
@@ -903,5 +954,310 @@ public class TemporalGranularityAnalyzer {
                     mvGranularity, queryGranularity, canSatisfy ? "COMPATIBLE" : "INCOMPATIBLE");
         
         return canSatisfy;
+    }
+    
+    /**
+     * Extracts temporal granularity requirements from filter expressions (WHERE clauses).
+     * Analyzes timestamp literals, range filters, and temporal function calls to determine
+     * the minimum granularity required for the MV to satisfy the filter constraints.
+     */
+    public TimeGranularity extractFilterGranularity(Expression whereClause) {
+        if (whereClause == null) {
+            return TimeGranularity.NONE;
+        }
+        
+        logger.debug("Analyzing filter expression for temporal granularity requirements: {}", whereClause);
+        
+        if (whereClause instanceof ComparisonExpression) {
+            return analyzeComparisonFilter((ComparisonExpression) whereClause);
+        }
+        
+        if (whereClause instanceof BetweenPredicate) {
+            return analyzeBetweenFilter((BetweenPredicate) whereClause);
+        }
+        
+        if (whereClause instanceof LogicalExpression) {
+            return analyzeLogicalFilter((LogicalExpression) whereClause);
+        }
+        
+        if (whereClause instanceof FunctionCall) {
+            // Check if this is a temporal function used in filtering
+            return analyzeTemporalFunctionFilter((FunctionCall) whereClause);
+        }
+        
+        // For other expression types, recursively search for temporal filter patterns
+        return searchForTemporalFilters(whereClause);
+    }
+    
+    /**
+     * Analyzes comparison expressions that might contain temporal filtering requirements.
+     * Examples: timestamp = '2025-01-01 15:30:00', timestamp >= start_time
+     */
+    private TimeGranularity analyzeComparisonFilter(ComparisonExpression expr) {
+        logger.debug("Analyzing comparison filter: {}", expr);
+        
+        // Check if either operand is a timestamp literal that imposes granularity requirements
+        TimeGranularity leftRequirement = analyzeOperandForTemporalRequirement(expr.getLeft());
+        TimeGranularity rightRequirement = analyzeOperandForTemporalRequirement(expr.getRight());
+        
+        return getFinestGranularity(leftRequirement, rightRequirement);
+    }
+    
+    /**
+     * Analyzes BETWEEN predicates for temporal range filtering requirements.
+     * Example: timestamp BETWEEN '2025-01-01 15:30' AND '2025-01-01 16:30'
+     */
+    private TimeGranularity analyzeBetweenFilter(BetweenPredicate expr) {
+        logger.debug("Analyzing BETWEEN filter: {}", expr);
+        
+        TimeGranularity minRequirement = analyzeOperandForTemporalRequirement(expr.getMin());
+        TimeGranularity maxRequirement = analyzeOperandForTemporalRequirement(expr.getMax());
+        
+        // For range filters, we need to check boundary alignment
+        TimeGranularity rangeRequirement = analyzeRangeAlignment(expr.getMin(), expr.getMax());
+        
+        return getFinestGranularity(minRequirement, maxRequirement, rangeRequirement);
+    }
+    
+    /**
+     * Analyzes logical expressions (AND, OR) by examining all sub-expressions.
+     */
+    private TimeGranularity analyzeLogicalFilter(LogicalExpression expr) {
+        logger.debug("Analyzing logical expression: {} with {} terms", expr.getOperator(), expr.getTerms().size());
+        
+        TimeGranularity finestRequirement = TimeGranularity.NONE;
+        
+        for (Expression term : expr.getTerms()) {
+            TimeGranularity termRequirement = extractFilterGranularity(term);
+            finestRequirement = getFinestGranularity(finestRequirement, termRequirement);
+        }
+        
+        return finestRequirement;
+    }
+    
+    /**
+     * Analyzes temporal function calls used in filtering.
+     * Examples: EXTRACT(HOUR FROM timestamp) = 15, DATE_TRUNC('day', timestamp) = '2025-01-01'
+     */
+    private TimeGranularity analyzeTemporalFunctionFilter(FunctionCall func) {
+        String functionName = func.getName().toString().toLowerCase();
+        
+        if ("extract".equals(functionName)) {
+            return analyzeExtractFunction(func);
+        }
+        
+        if ("date_trunc".equals(functionName)) {
+            return analyzeDateTruncFilter(func);
+        }
+        
+        // For other functions, search arguments for temporal patterns
+        return searchForTemporalFilters(func);
+    }
+    
+    /**
+     * Analyzes EXTRACT function calls to determine filtering granularity.
+     * Example: EXTRACT(HOUR FROM timestamp) = 15 requires HOUR granularity
+     */
+    private TimeGranularity analyzeExtractFunction(FunctionCall func) {
+        List<Expression> args = func.getArguments();
+        if (args.size() < 2) {
+            return TimeGranularity.NONE;
+        }
+        
+        Expression unitExpr = args.get(0);
+        if (unitExpr instanceof Identifier) {
+            String unit = ((Identifier) unitExpr).getValue().toLowerCase();
+            TimeGranularity granularity = TimeGranularity.fromUnit(unit);
+            if (granularity != TimeGranularity.UNKNOWN) {
+                logger.debug("EXTRACT({}) function requires {} granularity for filtering", unit, granularity);
+                return granularity;
+            }
+        }
+        
+        return TimeGranularity.NONE;
+    }
+    
+    /**
+     * Analyzes DATE_TRUNC function calls used in filtering.
+     * Example: DATE_TRUNC('day', timestamp) = '2025-01-01' requires DAY boundary alignment
+     */
+    private TimeGranularity analyzeDateTruncFilter(FunctionCall func) {
+        List<Expression> args = func.getArguments();
+        if (args.size() < 2) {
+            return TimeGranularity.NONE;
+        }
+        
+        Expression unitExpr = args.get(0);
+        if (unitExpr instanceof StringLiteral) {
+            String unit = ((StringLiteral) unitExpr).getValue();
+            TimeGranularity granularity = TimeGranularity.fromUnit(unit);
+            if (granularity != TimeGranularity.UNKNOWN) {
+                logger.debug("DATE_TRUNC('{}') filter requires {} granularity", unit, granularity);
+                return granularity;
+            }
+        }
+        
+        return TimeGranularity.NONE;
+    }
+    
+    /**
+     * Analyzes an operand to determine if it imposes temporal granularity requirements.
+     * Uses pattern-based detection that works with any AST node type.
+     */
+    private TimeGranularity analyzeOperandForTemporalRequirement(Expression operand) {
+        if (operand == null) {
+            return TimeGranularity.NONE;
+        }
+        
+        logger.debug("Analyzing operand type: {} with content: {}", operand.getClass().getSimpleName(), operand);
+        
+        // First, check for temporal functions
+        if (operand instanceof FunctionCall) {
+            TimeGranularity functionResult = analyzeTemporalFunctionFilter((FunctionCall) operand);
+            if (functionResult != TimeGranularity.NONE) {
+                return functionResult;
+            }
+        }
+        
+        // Use pattern-based detection on string representation
+        String operandStr = operand.toString();
+        return extractTemporalGranularityFromString(operandStr);
+    }
+    
+    /**
+     * Extracts temporal granularity from any string using pattern-based detection.
+     * This method is AST-node-agnostic and works with any temporal representation.
+     */
+    private TimeGranularity extractTemporalGranularityFromString(String input) {
+        if (input == null || input.trim().isEmpty()) {
+            return TimeGranularity.NONE;
+        }
+        
+        logger.debug("Analyzing string for temporal patterns: '{}'", input);
+        
+        // Try each temporal pattern in order
+        for (TemporalPattern temporalPattern : TEMPORAL_PATTERNS) {
+            Matcher matcher = temporalPattern.matcher(input);
+            if (matcher.find()) {
+                String extractedTimestamp = temporalPattern.extractTimestamp(matcher);
+                logger.debug("Found {} pattern, extracted timestamp: '{}'", 
+                           temporalPattern.getDescription(), extractedTimestamp);
+                
+                TimeGranularity granularity = analyzeTimestampString(extractedTimestamp);
+                if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
+                    logger.debug("Successfully determined granularity: {}", granularity);
+                    return granularity;
+                }
+            }
+        }
+        
+        logger.debug("No temporal patterns matched in string: '{}'", input);
+        return TimeGranularity.NONE;
+    }
+    
+    /**
+     * Analyzes timestamp literal strings to determine precision requirements.
+     * Uses the same pattern-based approach for consistency.
+     */
+    private TimeGranularity analyzeTimestampLiteral(StringLiteral literal) {
+        // Use the pattern-based approach for consistency
+        return extractTemporalGranularityFromString(literal.toString());
+    }
+    
+    /**
+     * Analyzes a timestamp string to determine precision requirements.
+     */
+    private TimeGranularity analyzeTimestampString(String timestamp) {
+        logger.debug("Analyzing timestamp string for precision: '{}'", timestamp);
+        
+        // Basic heuristic based on timestamp format and values
+        // More sophisticated parsing could be added later
+        
+        if (timestamp.matches("\\d{4}-\\d{2}-\\d{2}")) {
+            // Date only: YYYY-MM-DD
+            logger.debug("Date-only literal - requires DAY granularity");
+            return TimeGranularity.DAY;
+        }
+        
+        if (timestamp.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:00:00(\\.\\d+)?")) {
+            // Hour boundary: YYYY-MM-DD HH:00:00
+            logger.debug("Hour boundary literal - requires HOUR granularity");
+            return TimeGranularity.HOUR;
+        }
+        
+        if (timestamp.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:(00|30):00(\\.\\d+)?")) {
+            // Half-hour boundary: YYYY-MM-DD HH:(00|30):00
+            logger.debug("Half-hour boundary literal - requires 30-minute granularity");
+            return fromMinutes(30);
+        }
+        
+        if (timestamp.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:00(\\.\\d+)?")) {
+            // Minute boundary: YYYY-MM-DD HH:MM:00
+            logger.debug("Minute boundary literal - requires MINUTE granularity");
+            return TimeGranularity.MINUTE;
+        }
+        
+        if (timestamp.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}(\\.\\d+)?")) {
+            // Second precision: YYYY-MM-DD HH:MM:SS
+            logger.debug("Second precision literal - requires SECOND granularity");
+            return TimeGranularity.SECOND;
+        }
+        
+        // If we can't parse the format, return UNKNOWN for safety
+        logger.debug("Unrecognized timestamp format - returning UNKNOWN for safety");
+        return TimeGranularity.UNKNOWN;
+    }
+    
+    /**
+     * Analyzes range alignment for BETWEEN filters to determine granularity requirements.
+     */
+    private TimeGranularity analyzeRangeAlignment(Expression min, Expression max) {
+        // For now, return NONE - more sophisticated boundary analysis could be added
+        // This would check if the range boundaries align with MV bucket boundaries
+        return TimeGranularity.NONE;
+    }
+    
+    /**
+     * Recursively searches an expression tree for temporal filter patterns.
+     */
+    private TimeGranularity searchForTemporalFilters(Expression expr) {
+        // This could be enhanced to traverse complex expression trees
+        // For now, return NONE to avoid false positives
+        return TimeGranularity.NONE;
+    }
+    
+    /**
+     * Returns the finest (most precise) granularity from the given options.
+     * NONE is treated as "no temporal requirement" and any actual granularity takes precedence.
+     */
+    private TimeGranularity getFinestGranularity(TimeGranularity... granularities) {
+        TimeGranularity finest = TimeGranularity.NONE;
+        
+        for (TimeGranularity granularity : granularities) {
+            if (granularity == null || granularity.equals(TimeGranularity.UNKNOWN)) {
+                continue; // Skip null and UNKNOWN
+            }
+            
+            if (granularity.equals(TimeGranularity.NONE)) {
+                continue; // Skip NONE - it represents no temporal requirement
+            }
+            
+            // If we haven't found any temporal requirement yet, this becomes the finest
+            if (finest.equals(TimeGranularity.NONE)) {
+                finest = granularity;
+            } else if (granularity.isFinnerThan(finest)) {
+                // Replace with finer granularity
+                finest = granularity;
+            }
+        }
+        
+        return finest;
+    }
+    
+    /**
+     * Helper method to create minute-based granularities.
+     */
+    private static TimeGranularity fromMinutes(int minutes) {
+        return TimeGranularity.fromMilliseconds(minutes * 60L * 1000L);
     }
 }
