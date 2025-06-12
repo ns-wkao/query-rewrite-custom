@@ -28,6 +28,7 @@ public class TemporalGranularityAnalyzer {
         
         // Standard granularities (for backward compatibility)
         public static final TimeGranularity NONE = new TimeGranularity(0L, "NONE", false);
+        public static final TimeGranularity EXACT = new TimeGranularity(1L, "EXACT", false);
         public static final TimeGranularity MILLISECOND = new TimeGranularity(1L, "MILLISECOND", false);
         public static final TimeGranularity SECOND = new TimeGranularity(1_000L, "SECOND", false);
         public static final TimeGranularity MINUTE = new TimeGranularity(60_000L, "MINUTE", false);
@@ -111,6 +112,11 @@ public class TemporalGranularityAnalyzer {
         public boolean canSatisfy(TimeGranularity userRequirement) {
             if (userRequirement == null) {
                 return false; // Null is not compatible
+            }
+            
+            // EXACT granularity can never be satisfied by any MV
+            if (userRequirement.equals(EXACT)) {
+                return false; // Raw timestamp GROUP BY requires exact precision - no MV can satisfy
             }
             
             // UNKNOWN granularities are rejected for safety

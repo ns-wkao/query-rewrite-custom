@@ -251,6 +251,11 @@ public class QueryMetadataExtractor {
          * Returns the finest (most precise) granularity needed to satisfy both requirements.
          */
         private TimeGranularity calculateMinimumRequiredGranularity(TimeGranularity groupByGranularity, TimeGranularity filterGranularity) {
+            // Handle EXACT - if either requires EXACT precision, result is EXACT
+            if (groupByGranularity.equals(TimeGranularity.EXACT) || filterGranularity.equals(TimeGranularity.EXACT)) {
+                return TimeGranularity.EXACT;
+            }
+            
             // Handle UNKNOWN - reject if either requirement is unknown
             if (groupByGranularity.equals(TimeGranularity.UNKNOWN) || filterGranularity.equals(TimeGranularity.UNKNOWN)) {
                 return TimeGranularity.UNKNOWN;
@@ -462,21 +467,32 @@ public class QueryMetadataExtractor {
                         Expression resolvedExpr = resolveOrdinalReference(expr, selectItems);
                         logger.debug("Resolved GROUP BY expression type: {}", resolvedExpr.getClass().getSimpleName());
                         logger.debug("Resolved GROUP BY expression content: {}", resolvedExpr);
-                        // Analyze for temporal granularity
-                        TimeGranularity granularity = temporalAnalyzer.extractGranularity(resolvedExpr);
-                        if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
-                            logger.debug("Found temporal GROUP BY expression with granularity {}: {}", granularity, resolvedExpr);
+                        
+                        // Check if this is a raw timestamp column first
+                        if (isRawTimestampColumn(resolvedExpr)) {
+                            temporalGranularity = TimeGranularity.EXACT;
+                            logger.debug("Found raw timestamp column in GROUP BY - requires EXACT granularity: {}", resolvedExpr);
                             
-                            // Update the overall temporal granularity (keep the finest)
-                            if (temporalGranularity == TimeGranularity.NONE || 
-                                granularity.isFinnerThan(temporalGranularity)) {
-                                temporalGranularity = granularity;
-                                logger.debug("Updated overall temporal granularity to: {}", temporalGranularity);
-                            }
-                            
-                            // Extract column identifiers from the temporal expression
+                            // Extract column identifiers from the raw timestamp expression
                             Set<String> temporalColumns = extractIdentifiersFromExpression(resolvedExpr, sourceTableContext);
                             temporalGroupByColumns.addAll(temporalColumns);
+                        } else {
+                            // Analyze for temporal granularity using date_trunc functions
+                            TimeGranularity granularity = temporalAnalyzer.extractGranularity(resolvedExpr);
+                            if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
+                                logger.debug("Found temporal GROUP BY expression with granularity {}: {}", granularity, resolvedExpr);
+                                
+                                // Update the overall temporal granularity (keep the finest)
+                                if (temporalGranularity == TimeGranularity.NONE || 
+                                    granularity.isFinnerThan(temporalGranularity)) {
+                                    temporalGranularity = granularity;
+                                    logger.debug("Updated overall temporal granularity to: {}", temporalGranularity);
+                                }
+                                
+                                // Extract column identifiers from the temporal expression
+                                Set<String> temporalColumns = extractIdentifiersFromExpression(resolvedExpr, sourceTableContext);
+                                temporalGroupByColumns.addAll(temporalColumns);
+                            }
                         }
                         
                         // Extract regular column identifiers
@@ -508,6 +524,24 @@ public class QueryMetadataExtractor {
             // For now, use the same identifier extraction logic as regular filters
             // This could be enhanced to specifically target temporal column references
             return extractIdentifiersFromExpression(where, sourceTableContext);
+        }
+        
+        /**
+         * Checks if an expression is a raw timestamp column (not wrapped in date_trunc).
+         * Currently only detects columns named "timestamp".
+         */
+        private boolean isRawTimestampColumn(Expression expr) {
+            if (expr instanceof Identifier) {
+                return "timestamp".equalsIgnoreCase(((Identifier) expr).getValue());
+            }
+            
+            if (expr instanceof DereferenceExpression) {
+                DereferenceExpression deref = (DereferenceExpression) expr;
+                return deref.getField().isPresent() && 
+                       "timestamp".equalsIgnoreCase(deref.getField().get().getValue());
+            }
+            
+            return false;
         }
 
         private Expression resolveOrdinalReference(Expression expr, List<SelectItem> selectItems) {
