@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Locale;
 import java.util.Arrays;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 
@@ -16,6 +17,21 @@ import java.util.regex.Matcher;
  */
 public class TemporalGranularityAnalyzer {
     private static final Logger logger = LoggerFactory.getLogger(TemporalGranularityAnalyzer.class);
+    
+    // Function name constants for temporal analysis
+    private static final String DATE_TRUNC = "date_trunc";
+    private static final String FROM_UNIXTIME = "from_unixtime";
+    private static final String DATE_FORMAT = "date_format";
+    private static final String DATE_ADD = "date_add";
+    private static final String EXTRACT = "extract";
+    private static final String TO_UNIXTIME = "to_unixtime";
+    private static final String DAY_OF_WEEK = "day_of_week";
+    private static final String MOD = "mod";
+    
+    // Set of known temporal functions for quick lookup
+    private static final Set<String> TEMPORAL_FUNCTIONS = Set.of(
+        DATE_TRUNC, FROM_UNIXTIME, DATE_FORMAT, DATE_ADD, EXTRACT
+    );
     
     /**
      * Represents temporal granularity with flexible support for custom intervals.
@@ -302,58 +318,77 @@ public class TemporalGranularityAnalyzer {
     );
     
     /**
-     * Extracts temporal granularity from a SQL expression.
+     * Extracts temporal granularity from a SQL expression (unified method for GROUP BY and filter analysis).
      * Handles function calls, arithmetic expressions, and nested temporal patterns.
      */
     public TimeGranularity extractGranularity(Expression expr) {
+        return extractTemporalGranularity(expr);
+    }
+    
+    /**
+     * Unified temporal granularity extraction for any expression.
+     * Used by both GROUP BY analysis (extractGranularity) and filter analysis (extractFilterGranularity).
+     */
+    private TimeGranularity extractTemporalGranularity(Expression expr) {
         logger.debug("=== TEMPORAL ANALYSIS START ===");
         logger.debug("Expression type: {}", expr.getClass().getSimpleName());
         logger.debug("Expression toString: {}", expr.toString());
+        
         if (expr == null) {
             return TimeGranularity.NONE;
         }
         
         logger.debug("Analyzing expression for temporal granularity: {}", expr);
         
+        // Try function-based detection first (date_trunc, etc.)
         if (expr instanceof FunctionCall) {
             logger.debug("Processing as FunctionCall");
-            FunctionCall func = (FunctionCall) expr;
-            return extractFromFunctionCall(func);
+            TimeGranularity funcResult = extractFromFunctionCall((FunctionCall) expr);
+            if (funcResult != TimeGranularity.NONE) {
+                return funcResult;
+            }
         }
         
+        // Try pattern-based detection for temporal literals
+        TimeGranularity patternResult = extractTemporalGranularityFromString(expr.toString());
+        if (patternResult != TimeGranularity.NONE) {
+            return patternResult;
+        }
+        
+        // Handle complex expressions that might contain temporal patterns
+        return extractFromComplexExpression(expr);
+    }
+    
+    /**
+     * Handles complex expression types that might contain nested temporal patterns.
+     */
+    private TimeGranularity extractFromComplexExpression(Expression expr) {
         if (expr instanceof ArithmeticBinaryExpression) {
-            // Handle arithmetic expressions that might contain temporal functions
             return extractFromArithmeticExpression((ArithmeticBinaryExpression) expr);
         }
         
         if (expr instanceof Cast) {
-            // Handle CAST expressions that might wrap temporal functions
             return extractFromCastExpression((Cast) expr);
         }
         
         if (expr instanceof SearchedCaseExpression) {
-            // Handle CASE expressions that contain temporal functions in WHEN/ELSE clauses
             logger.debug("Processing as SearchedCaseExpression");
             return extractFromSearchedCaseExpression((SearchedCaseExpression) expr);
         }
         
         if (expr instanceof SimpleCaseExpression) {
-            // Handle simple CASE expressions (CASE column WHEN value THEN result)
             return extractFromSimpleCaseExpression((SimpleCaseExpression) expr);
         }
         
         if (expr instanceof IfExpression) {
-            // Handle IF expressions that might contain temporal functions
             return extractFromIfExpression((IfExpression) expr);
         }
         
         if (expr instanceof ComparisonExpression) {
-            // Handle comparison expressions that might contain temporal functions in operands
             logger.debug("Processing as ComparisonExpression");
             return extractFromComparisonExpression((ComparisonExpression) expr);
         }
         
-        // Future: Could extend to handle other expression types
         logger.debug("Expression type '{}' not recognized for temporal analysis - no temporal granularity found", expr.getClass().getSimpleName());
         return TimeGranularity.NONE;
     }
@@ -533,7 +568,7 @@ public class TemporalGranularityAnalyzer {
         
         // Pattern: DATE_FORMAT(DATE_TRUNC('DAY', DATE_ADD('day', week_offset, timestamp)), '%Y-%m-%d')
         // This represents weekly aggregation
-        if ("date_format".equals(functionName)) {
+        if (DATE_FORMAT.equals(functionName)) {
             TimeGranularity weekPattern = detectWeekStartPattern(func);
             if (weekPattern != TimeGranularity.NONE && weekPattern != TimeGranularity.UNKNOWN) {
                 return weekPattern;
@@ -542,7 +577,7 @@ public class TemporalGranularityAnalyzer {
         
         // Pattern: DATE_TRUNC('DAY', DATE_ADD('day', week_offset, timestamp))
         // This also represents weekly aggregation when used with week offset calculations
-        if ("date_trunc".equals(functionName)) {
+        if (DATE_TRUNC.equals(functionName)) {
             TimeGranularity weekPattern = detectDateTruncWeekPattern(func);
             if (weekPattern != TimeGranularity.NONE && weekPattern != TimeGranularity.UNKNOWN) {
                 return weekPattern;
@@ -576,7 +611,7 @@ public class TemporalGranularityAnalyzer {
      * Pattern: DATE_TRUNC('DAY', DATE_ADD('day', week_calculation, timestamp))
      */
     private TimeGranularity detectDateTruncWeekPattern(FunctionCall dateTruncFunc) {
-        if (!"date_trunc".equals(dateTruncFunc.getName().toString().toLowerCase())) {
+        if (!DATE_TRUNC.equals(dateTruncFunc.getName().toString().toLowerCase())) {
             return TimeGranularity.NONE;
         }
         
@@ -617,7 +652,7 @@ public class TemporalGranularityAnalyzer {
      */
     private boolean isWeekCalculationDateAdd(FunctionCall dateAddFunc) {
         String funcName = dateAddFunc.getName().toString().toLowerCase();
-        if (!"date_add".equals(funcName) && !"dateadd".equals(funcName)) {
+        if (!DATE_ADD.equals(funcName)) {
             return false;
         }
         
@@ -652,13 +687,13 @@ public class TemporalGranularityAnalyzer {
             String funcName = func.getName().toString().toLowerCase();
             
             // Check for DAY_OF_WEEK function
-            if ("day_of_week".equals(funcName)) {
+            if (DAY_OF_WEEK.equals(funcName)) {
                 logger.debug("Found DAY_OF_WEEK function - week calculation detected");
                 return true;
             }
             
             // Check for MOD function with value 7
-            if ("mod".equals(funcName)) {
+            if (MOD.equals(funcName)) {
                 List<Expression> args = func.getArguments();
                 if (args.size() >= 2) {
                     Expression secondArg = args.get(1);
@@ -791,7 +826,7 @@ public class TemporalGranularityAnalyzer {
             FunctionCall func = (FunctionCall) expr;
             String funcName = func.getName().toString().toLowerCase();
             
-            if ("to_unixtime".equals(funcName)) {
+            if (TO_UNIXTIME.equals(funcName)) {
                 logger.debug("Found TO_UNIXTIME function in Unix timestamp pattern");
                 return true;
             }
@@ -821,8 +856,13 @@ public class TemporalGranularityAnalyzer {
     private TimeGranularity extractFromFunctionCall(FunctionCall func) {
         String functionName = func.getName().toString().toLowerCase(Locale.ROOT);
         
+        // Early exit for non-temporal functions
+        if (!TEMPORAL_FUNCTIONS.contains(functionName)) {
+            return extractFromNestedArguments(func);
+        }
+        
         // Check for Unix timestamp patterns first (they have higher priority for custom granularities)
-        if ("from_unixtime".equals(functionName)) {
+        if (FROM_UNIXTIME.equals(functionName)) {
             TimeGranularity unixPattern = detectUnixTimestampPattern(func);
             if (unixPattern != TimeGranularity.NONE && unixPattern != TimeGranularity.UNKNOWN) {
                 return unixPattern;
@@ -835,20 +875,20 @@ public class TemporalGranularityAnalyzer {
             return semanticGranularity;
         }
         
-        if ("date_trunc".equals(functionName)) {
-            return extractFromDateTruncFunction(func);
+        // Handle specific temporal functions
+        switch (functionName) {
+            case DATE_TRUNC:
+                return extractFromDateTruncFunction(func);
+            case DATE_FORMAT:
+                return extractFromDateFormatFunction(func);
+            case DATE_ADD:
+                return extractFromDateAddFunction(func);
+            case EXTRACT:
+                return analyzeExtractFunction(func);
+            default:
+                // For other temporal functions, recursively search their arguments
+                return extractFromNestedArguments(func);
         }
-        
-        if ("date_format".equals(functionName)) {
-            return extractFromDateFormatFunction(func);
-        }
-        
-        if ("date_add".equals(functionName) || "dateadd".equals(functionName)) {
-            return extractFromDateAddFunction(func);
-        }
-        
-        // For other functions, recursively search their arguments for temporal patterns
-        return extractFromNestedArguments(func);
     }
     
     /**
@@ -974,6 +1014,7 @@ public class TemporalGranularityAnalyzer {
         
         logger.debug("Analyzing filter expression for temporal granularity requirements: {}", whereClause);
         
+        // Handle special filter-specific expression types
         if (whereClause instanceof ComparisonExpression) {
             return analyzeComparisonFilter((ComparisonExpression) whereClause);
         }
@@ -986,13 +1027,8 @@ public class TemporalGranularityAnalyzer {
             return analyzeLogicalFilter((LogicalExpression) whereClause);
         }
         
-        if (whereClause instanceof FunctionCall) {
-            // Check if this is a temporal function used in filtering
-            return analyzeTemporalFunctionFilter((FunctionCall) whereClause);
-        }
-        
-        // For other expression types, recursively search for temporal filter patterns
-        return searchForTemporalFilters(whereClause);
+        // For other expressions, use the unified temporal detection
+        return extractTemporalGranularity(whereClause);
     }
     
     /**
@@ -1041,24 +1077,6 @@ public class TemporalGranularityAnalyzer {
         return finestRequirement;
     }
     
-    /**
-     * Analyzes temporal function calls used in filtering.
-     * Examples: EXTRACT(HOUR FROM timestamp) = 15, DATE_TRUNC('day', timestamp) = '2025-01-01'
-     */
-    private TimeGranularity analyzeTemporalFunctionFilter(FunctionCall func) {
-        String functionName = func.getName().toString().toLowerCase();
-        
-        if ("extract".equals(functionName)) {
-            return analyzeExtractFunction(func);
-        }
-        
-        if ("date_trunc".equals(functionName)) {
-            return analyzeDateTruncFilter(func);
-        }
-        
-        // For other functions, search arguments for temporal patterns
-        return searchForTemporalFilters(func);
-    }
     
     /**
      * Analyzes EXTRACT function calls to determine filtering granularity.
@@ -1083,32 +1101,10 @@ public class TemporalGranularityAnalyzer {
         return TimeGranularity.NONE;
     }
     
-    /**
-     * Analyzes DATE_TRUNC function calls used in filtering.
-     * Example: DATE_TRUNC('day', timestamp) = '2025-01-01' requires DAY boundary alignment
-     */
-    private TimeGranularity analyzeDateTruncFilter(FunctionCall func) {
-        List<Expression> args = func.getArguments();
-        if (args.size() < 2) {
-            return TimeGranularity.NONE;
-        }
-        
-        Expression unitExpr = args.get(0);
-        if (unitExpr instanceof StringLiteral) {
-            String unit = ((StringLiteral) unitExpr).getValue();
-            TimeGranularity granularity = TimeGranularity.fromUnit(unit);
-            if (granularity != TimeGranularity.UNKNOWN) {
-                logger.debug("DATE_TRUNC('{}') filter requires {} granularity", unit, granularity);
-                return granularity;
-            }
-        }
-        
-        return TimeGranularity.NONE;
-    }
     
     /**
      * Analyzes an operand to determine if it imposes temporal granularity requirements.
-     * Uses pattern-based detection that works with any AST node type.
+     * Uses the unified temporal detection logic.
      */
     private TimeGranularity analyzeOperandForTemporalRequirement(Expression operand) {
         if (operand == null) {
@@ -1117,17 +1113,8 @@ public class TemporalGranularityAnalyzer {
         
         logger.debug("Analyzing operand type: {} with content: {}", operand.getClass().getSimpleName(), operand);
         
-        // First, check for temporal functions
-        if (operand instanceof FunctionCall) {
-            TimeGranularity functionResult = analyzeTemporalFunctionFilter((FunctionCall) operand);
-            if (functionResult != TimeGranularity.NONE) {
-                return functionResult;
-            }
-        }
-        
-        // Use pattern-based detection on string representation
-        String operandStr = operand.toString();
-        return extractTemporalGranularityFromString(operandStr);
+        // Use unified temporal detection
+        return extractTemporalGranularity(operand);
     }
     
     /**
@@ -1161,14 +1148,6 @@ public class TemporalGranularityAnalyzer {
         return TimeGranularity.NONE;
     }
     
-    /**
-     * Analyzes timestamp literal strings to determine precision requirements.
-     * Uses the same pattern-based approach for consistency.
-     */
-    private TimeGranularity analyzeTimestampLiteral(StringLiteral literal) {
-        // Use the pattern-based approach for consistency
-        return extractTemporalGranularityFromString(literal.toString());
-    }
     
     /**
      * Analyzes a timestamp string to determine precision requirements.
@@ -1223,14 +1202,6 @@ public class TemporalGranularityAnalyzer {
         return TimeGranularity.NONE;
     }
     
-    /**
-     * Recursively searches an expression tree for temporal filter patterns.
-     */
-    private TimeGranularity searchForTemporalFilters(Expression expr) {
-        // This could be enhanced to traverse complex expression trees
-        // For now, return NONE to avoid false positives
-        return TimeGranularity.NONE;
-    }
     
     /**
      * Returns the finest (most precise) granularity from the given options.

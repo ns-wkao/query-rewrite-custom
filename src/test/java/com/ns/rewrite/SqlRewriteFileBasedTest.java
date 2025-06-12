@@ -66,20 +66,58 @@ public class SqlRewriteFileBasedTest {
         }
 
         List<Arguments> testArguments = new ArrayList<>();
-        try (Stream<Path> dirs = Files.list(baseDirPath).filter(Files::isDirectory)) {
-            dirs.forEach(testCaseDir -> {
-                String name = testCaseDir.getFileName().toString();
-                if (filter != null && !name.contains(filter)) {
-                    return;
-                }
-                Path q = testCaseDir.resolve("query.sql");
-                Path e = testCaseDir.resolve("expected.sql");
-                if (Files.exists(q) && Files.exists(e)) {
-                    testArguments.add(Arguments.of(q, name));
-                }
-            });
+        
+        // Recursively walk through all directories to find test cases
+        try (Stream<Path> paths = Files.walk(baseDirPath, 2)) {  // Limit depth to 2 (base + group directories)
+            paths.filter(Files::isDirectory)
+                 .filter(testCaseDir -> {
+                     // Check if this directory contains query.sql and expected.sql
+                     return Files.exists(testCaseDir.resolve("query.sql")) && 
+                            Files.exists(testCaseDir.resolve("expected.sql"));
+                 })
+                 .forEach(testCaseDir -> {
+                     String testCaseName = testCaseDir.getFileName().toString();
+                     String groupName = getGroupName(baseDirPath, testCaseDir);
+                     
+                     // Enhanced filtering: check both group name and test case name
+                     if (filter != null && !matchesFilter(filter, groupName, testCaseName)) {
+                         return;
+                     }
+                     
+                     Path queryFile = testCaseDir.resolve("query.sql");
+                     String displayName = groupName.isEmpty() ? testCaseName : groupName + "/" + testCaseName;
+                     testArguments.add(Arguments.of(queryFile, displayName));
+                 });
         }
         return testArguments.stream();
+    }
+    
+    /**
+     * Determines the group name for a test case based on its directory structure.
+     */
+    private static String getGroupName(Path baseDirPath, Path testCaseDir) {
+        Path parent = testCaseDir.getParent();
+        if (parent != null && !parent.equals(baseDirPath)) {
+            return parent.getFileName().toString();
+        }
+        return ""; // Test case is directly in the base directory
+    }
+    
+    /**
+     * Enhanced filtering logic that supports both group-based and test-name-based filtering.
+     */
+    private static boolean matchesFilter(String filter, String groupName, String testCaseName) {
+        // Check if filter matches group name (for group-based filtering)
+        if (groupName.contains(filter)) {
+            return true;
+        }
+        
+        // Check if filter matches test case name (for specific test filtering)
+        if (testCaseName.contains(filter)) {
+            return true;
+        }
+        
+        return false;
     }
 
     @DisplayName("SQL Rewrite Test Case:")
