@@ -337,7 +337,12 @@ public class TemporalGranularityAnalyzer {
             return extractFromComparisonExpression((ComparisonExpression) expr);
         }
         
-        logger.debug("Expression type '{}' not recognized for temporal analysis - no temporal granularity found", expr.getClass().getSimpleName());
+        if (expr instanceof Extract) {
+            logger.debug("Processing as Extract expression");
+            return extractFromExtractExpression((Extract) expr);
+        }
+        
+        //logger.debug("Expression type '{}' not recognized for temporal analysis - no temporal granularity found", expr.getClass().getSimpleName());
         return TimeGranularity.NONE;
     }
     
@@ -461,11 +466,18 @@ public class TemporalGranularityAnalyzer {
             StringLiteral stringLiteral = (StringLiteral) expr;
             String value = stringLiteral.getValue();
             
-            // Analyze the string content for timestamp patterns
-            TimeGranularity granularity = analyzeTimestampStringDirect(value);
-            if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
-                logger.debug("Extracted granularity {} from string literal: '{}'", granularity, value);
-                return granularity;
+            // First check if this is a temporal unit string (minute, hour, day, etc.)
+            TimeGranularity unitGranularity = TimeGranularity.fromUnit(value);
+            if (unitGranularity != TimeGranularity.UNKNOWN) {
+                logger.debug("Extracted granularity {} from temporal unit string literal: '{}'", unitGranularity, value);
+                return unitGranularity;
+            }
+            
+            // Then analyze the string content for timestamp patterns
+            TimeGranularity timestampGranularity = analyzeTimestampStringDirect(value);
+            if (timestampGranularity != TimeGranularity.NONE && timestampGranularity != TimeGranularity.UNKNOWN) {
+                logger.debug("Extracted granularity {} from timestamp string literal: '{}'", timestampGranularity, value);
+                return timestampGranularity;
             }
         }
         
@@ -573,6 +585,31 @@ public class TemporalGranularityAnalyzer {
             logger.debug("Found temporal granularity {} within CAST expression", granularity);
         }
         return granularity;
+    }
+    
+    /**
+     * Extracts granularity from EXTRACT expressions.
+     * Example: EXTRACT(HOUR FROM timestamp) requires HOUR granularity
+     */
+    private TimeGranularity extractFromExtractExpression(Extract expr) {
+        Extract.Field field = expr.getField();
+        if (field != null) {
+            String unit = field.toString().toLowerCase();
+            TimeGranularity granularity = TimeGranularity.fromUnit(unit);
+            if (granularity != TimeGranularity.UNKNOWN) {
+                logger.debug("EXTRACT({}) expression requires {} granularity", unit, granularity);
+                return granularity;
+            }
+        }
+        
+        // Also check the expression being extracted from for nested temporal patterns
+        TimeGranularity sourceGranularity = extractGranularity(expr.getExpression());
+        if (sourceGranularity != TimeGranularity.NONE && sourceGranularity != TimeGranularity.UNKNOWN) {
+            logger.debug("Found nested temporal granularity {} in EXTRACT source expression", sourceGranularity);
+            return sourceGranularity;
+        }
+        
+        return TimeGranularity.NONE;
     }
     
     /**
@@ -941,21 +978,16 @@ public class TemporalGranularityAnalyzer {
     }
     
     /**
-     * Extracts granularity from DATE_ADD function calls that might contain DATE_TRUNC.
+     * Extracts granularity from DATE_ADD function calls by finding ALL temporal patterns.
+     * Uses the unified approach: find all granularities in all arguments, return finest.
      * Expected format: DATE_ADD('unit', interval, date_trunc('unit', timestamp))
      */
     private TimeGranularity extractFromDateAddFunction(FunctionCall func) {
-        List<Expression> arguments = func.getArguments();
+        logger.debug("Analyzing DATE_ADD function for all temporal patterns");
         
-        if (arguments.size() < 3) {
-            logger.debug("DATE_ADD function has insufficient arguments: {}", arguments.size());
-            return TimeGranularity.NONE;
-        }
-        
-        // DATE_ADD typically has format: DATE_ADD(unit, interval, source_date)
-        // We're interested in the source_date (3rd argument) which might contain DATE_TRUNC
-        Expression sourceDateExpression = arguments.get(2);
-        TimeGranularity granularity = extractGranularity(sourceDateExpression);
+        // Use the general recursive approach to find ALL temporal granularities
+        // This will find both the unit parameter and any nested temporal functions
+        TimeGranularity granularity = extractFromNestedArguments(func);
         
         if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
             logger.debug("Found temporal granularity {} within DATE_ADD function", granularity);
@@ -966,22 +998,35 @@ public class TemporalGranularityAnalyzer {
     
     /**
      * Recursively searches function arguments for temporal patterns.
-     * This handles cases where DATE_TRUNC might be nested deep in complex expressions.
+     * Finds ALL temporal granularities in ALL arguments and returns the finest.
+     * This handles cases where temporal patterns might be in multiple arguments.
      */
     private TimeGranularity extractFromNestedArguments(FunctionCall func) {
         List<Expression> arguments = func.getArguments();
         
+        // Collect all granularities found in all arguments
+        TimeGranularity[] granularities = new TimeGranularity[arguments.size()];
+        int index = 0;
+        
         for (Expression arg : arguments) {
             TimeGranularity granularity = extractGranularity(arg);
             if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
-                logger.debug("Found temporal granularity {} in nested argument of function '{}'", 
-                           granularity, func.getName());
-                return granularity;
+                logger.debug("Found temporal granularity {} in argument {} of function '{}'", 
+                           granularity, index, func.getName());
+                granularities[index] = granularity;
             }
+            index++;
         }
         
-        logger.debug("No temporal granularity found in function '{}' arguments", func.getName());
-        return TimeGranularity.NONE;
+        // Return the finest granularity found across all arguments
+        TimeGranularity finestGranularity = getFinestGranularity(granularities);
+        if (finestGranularity != TimeGranularity.NONE) {
+            logger.debug("Finest temporal granularity from function '{}' arguments: {}", func.getName(), finestGranularity);
+        } else {
+            logger.debug("No temporal granularity found in function '{}' arguments", func.getName());
+        }
+        
+        return finestGranularity;
     }
     
     /**

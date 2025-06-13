@@ -1,4 +1,3 @@
--- date_add() with hour intervals - should match HOUR MV
 SELECT 
     date_add('hour', 2, date_trunc('hour', timestamp)) AS time_bucket,
     ns_tenant_id,

@@ -1,4 +1,3 @@
--- CASE with mixed granularities - should require MINUTE (no match with hour MVs)
 SELECT 
     CASE 
         WHEN alert_type = 'DLP' THEN date_trunc('day', timestamp)

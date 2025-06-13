@@ -1,4 +1,3 @@
--- date_add() with minute intervals - should be NO MATCH  
 SELECT 
     date_add('minute', 30, date_trunc('hour', timestamp)) AS time_bucket,
     ns_tenant_id,

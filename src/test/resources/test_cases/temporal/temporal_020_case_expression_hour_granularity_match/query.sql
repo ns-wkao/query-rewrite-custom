@@ -1,4 +1,3 @@
--- CASE with hour/day granularities - should match HOUR MV
 SELECT 
     CASE 
         WHEN action = 'block' THEN date_trunc('hour', timestamp)
