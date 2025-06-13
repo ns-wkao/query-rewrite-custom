@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Analyzes temporal granularity in SQL expressions to determine materialized view compatibility.
@@ -269,6 +271,104 @@ public class TemporalGranularityAnalyzer {
         }
     }
     
+    /**
+     * Represents a timestamp pattern with its regex and optional fixed granularity.
+     * Used for flexible timestamp string parsing.
+     */
+    private static class TimestampPattern {
+        private final Pattern pattern;
+        private final TimeGranularity fixedGranularity; // null means analyze groups
+        private final String description;
+        
+        public TimestampPattern(Pattern pattern, TimeGranularity fixedGranularity, String description) {
+            this.pattern = pattern;
+            this.fixedGranularity = fixedGranularity;
+            this.description = description;
+        }
+        
+        public Pattern getPattern() {
+            return pattern;
+        }
+        
+        public TimeGranularity getFixedGranularity() {
+            return fixedGranularity;
+        }
+        
+        public String getDescription() {
+            return description;
+        }
+    }
+    
+    // ===== TIMESTAMP PATTERN DEFINITIONS =====
+    private static final List<TimestampPattern> TIMESTAMP_PATTERNS = List.of(
+        // Date only patterns - highest precision is DAY
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})$"),
+            TimeGranularity.DAY,
+            "ISO date: YYYY-MM-DD"
+        ),
+        
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})/(?<month>\\d{2})/(?<day>\\d{2})$"),
+            TimeGranularity.DAY,
+            "US date: YYYY/MM/DD"
+        ),
+        
+        // Explicit hour boundary patterns (more specific, so checked first)
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})[T ](?<hour>\\d{2}):00:00(?:\\.000)?(?<timezone>[Z]|[+-]\\d{2}:?\\d{2}|\\s+[A-Z]{3,4})?$"),
+            TimeGranularity.HOUR,
+            "Hour boundary with optional timezone"
+        ),
+        
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})/(?<month>\\d{2})/(?<day>\\d{2}) (?<hour>\\d{2}):00:00$"),
+            TimeGranularity.HOUR,
+            "US hour boundary"
+        ),
+        
+        // ISO 8601 full timestamp with comprehensive support
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})[T ](?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})(?:\\.(?<millisecond>\\d{1,6}))?(?<timezone>[Z]|[+-]\\d{2}:?\\d{2}|\\s+[A-Z]{3,4})?$"),
+            null, // Analyze groups
+            "ISO 8601 timestamp with optional milliseconds and timezone"
+        ),
+        
+        // US format timestamp
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})/(?<month>\\d{2})/(?<day>\\d{2}) (?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})(?:\\.(?<millisecond>\\d{1,6}))?$"),
+            null, // Analyze groups
+            "US timestamp with optional milliseconds"
+        ),
+        
+        // European format (DD/MM/YYYY or DD-MM-YYYY)
+        new TimestampPattern(
+            Pattern.compile("^(?<day>\\d{2})[/-](?<month>\\d{2})[/-](?<year>\\d{4}) (?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})(?:\\.(?<millisecond>\\d{1,6}))?$"),
+            null, // Analyze groups  
+            "European timestamp"
+        ),
+        
+        // Compact format (no separators)
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})(?<month>\\d{2})(?<day>\\d{2})(?<hour>\\d{2})(?<minute>\\d{2})(?<second>\\d{2})(?<millisecond>\\d{3})?$"),
+            null, // Analyze groups
+            "Compact timestamp: YYYYMMDDHHMMSS"
+        ),
+        
+        // Time only patterns (assume current date)
+        new TimestampPattern(
+            Pattern.compile("^(?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})(?:\\.(?<millisecond>\\d{1,6}))?$"),
+            null, // Analyze groups
+            "Time only: HH:MM:SS"
+        ),
+        
+        new TimestampPattern(
+            Pattern.compile("^(?<hour>\\d{2}):(?<minute>\\d{2})$"),
+            TimeGranularity.MINUTE,
+            "Time only: HH:MM"
+        )
+    );
+    
     // ===== PUBLIC API =====
     
     /**
@@ -349,13 +449,13 @@ public class TemporalGranularityAnalyzer {
      * @return The finest temporal granularity found across all nested patterns
      */
     private TimeGranularity analyzeTemporalExpression(Expression expr) {
-        logger.debug("=== TEMPORAL ANALYSIS START ===");
-        logger.debug("Expression type: {}", expr.getClass().getSimpleName());
-        logger.debug("Expression toString: {}", expr.toString());
-        
         if (expr == null) {
             return TimeGranularity.NONE;
         }
+        
+        logger.debug("=== TEMPORAL ANALYSIS START ===");
+        logger.debug("Expression type: {}", expr.getClass().getSimpleName());
+        logger.debug("Expression toString: {}", expr.toString());
         
         logger.debug("Analyzing expression for temporal granularity: {}", expr);
         
@@ -884,55 +984,92 @@ public class TemporalGranularityAnalyzer {
     }
     
     /**
-     * Analyzes timestamp strings for precision without using regex.
-     * Uses direct string analysis to determine granularity requirements.
+     * Analyzes timestamp strings for precision using flexible regex pattern matching.
+     * Supports various timestamp formats including ISO 8601, US formats, and more.
      * 
      * @param timestamp The timestamp string to analyze
      * @return The granularity required based on timestamp precision
      * 
      * Examples:
      * - "2025-01-01" → DAY
-     * - "2025-01-01 15:00:00" → HOUR
+     * - "2025-01-01T15:00:00Z" → HOUR  
      * - "2025-01-01 15:30:00" → MINUTE
+     * - "2025/01/01 15:30:45.123" → MILLISECOND
      */
     private TimeGranularity analyzeTimestampString(String timestamp) {
         if (timestamp == null || timestamp.trim().isEmpty()) {
             return TimeGranularity.NONE;
         }
         
-        logger.debug("Analyzing timestamp string for precision: '{}'", timestamp);
+        String normalizedTimestamp = timestamp.trim();
+        logger.debug("Analyzing timestamp string for precision: '{}'", normalizedTimestamp);
         
-        // Basic pattern analysis without regex
-        // Date only: YYYY-MM-DD (length 10)
-        if (timestamp.length() == 10 && timestamp.charAt(4) == '-' && timestamp.charAt(7) == '-') {
-            logger.debug("Date-only literal - requires DAY granularity");
-            return TimeGranularity.DAY;
-        }
-        
-        // Full timestamp patterns
-        if (timestamp.length() >= 19) { // At least YYYY-MM-DD HH:MM:SS
-            // Check seconds precision
-            if (timestamp.substring(17, 19).equals("00")) {
-                // Check minutes precision
-                if (timestamp.substring(14, 16).equals("00")) {
-                    // Hour boundary: YYYY-MM-DD HH:00:00
-                    logger.debug("Hour boundary literal - requires HOUR granularity");
-                    return TimeGranularity.HOUR;
+        // Try each pattern in order (more specific patterns first)
+        for (TimestampPattern timestampPattern : TIMESTAMP_PATTERNS) {
+            Matcher matcher = timestampPattern.getPattern().matcher(normalizedTimestamp);
+            if (matcher.matches()) {
+                logger.debug("Matched pattern: {}", timestampPattern.getDescription());
+                
+                if (timestampPattern.getFixedGranularity() != null) {
+                    // Fixed granularity pattern
+                    TimeGranularity granularity = timestampPattern.getFixedGranularity();
+                    logger.debug("Fixed granularity {} from pattern: {}", granularity, timestampPattern.getDescription());
+                    return granularity;
                 } else {
-                    // Minute boundary: YYYY-MM-DD HH:MM:00
-                    logger.debug("Minute boundary literal - requires MINUTE granularity");
-                    return TimeGranularity.MINUTE;
+                    // Analyze captured groups to determine granularity
+                    TimeGranularity granularity = analyzeMatchedGroups(matcher);
+                    logger.debug("Analyzed granularity {} from matched groups", granularity);
+                    return granularity;
                 }
-            } else {
-                // Second precision: YYYY-MM-DD HH:MM:SS
-                logger.debug("Second precision literal - requires SECOND granularity");
-                return TimeGranularity.SECOND;
             }
         }
         
-        // If we can't parse the format, return UNKNOWN for safety
-        logger.debug("Unrecognized timestamp format - returning UNKNOWN for safety");
+        // If no pattern matches, return UNKNOWN for safety
+        logger.debug("No timestamp pattern matched for '{}' - returning UNKNOWN for safety", normalizedTimestamp);
         return TimeGranularity.UNKNOWN;
+    }
+    
+    /**
+     * Analyzes matched regex groups to determine the finest temporal granularity.
+     * 
+     * @param matcher The regex matcher with captured groups
+     * @return The finest granularity based on captured components
+     */
+    private TimeGranularity analyzeMatchedGroups(Matcher matcher) {
+        // Check for milliseconds first (finest precision)
+        String milliseconds = matcher.group("millisecond");
+        if (milliseconds != null && !milliseconds.isEmpty()) {
+            // Check if milliseconds are non-zero (actual sub-second precision)
+            if (!milliseconds.matches("0+")) {
+                logger.debug("Found non-zero milliseconds: {} - requires MILLISECOND granularity", milliseconds);
+                return TimeGranularity.MILLISECOND;
+            }
+            // If milliseconds are all zeros, continue to check seconds
+        }
+        
+        // Check seconds (if not at boundary)
+        String seconds = matcher.group("second");
+        if (seconds != null && !"00".equals(seconds)) {
+            logger.debug("Found non-zero seconds: {} - requires SECOND granularity", seconds);
+            return TimeGranularity.SECOND;
+        }
+        
+        // Check minutes (if not at boundary)
+        String minutes = matcher.group("minute");
+        if (minutes != null && !"00".equals(minutes)) {
+            logger.debug("Found non-zero minutes: {} - requires MINUTE granularity", minutes);
+            return TimeGranularity.MINUTE;
+        }
+        
+        // Has time components but at hour boundary
+        if (matcher.group("hour") != null) {
+            logger.debug("Found hour component at boundary - requires HOUR granularity");
+            return TimeGranularity.HOUR;
+        }
+        
+        // Date only
+        logger.debug("Only date components found - requires DAY granularity");
+        return TimeGranularity.DAY;
     }
     
     /**
