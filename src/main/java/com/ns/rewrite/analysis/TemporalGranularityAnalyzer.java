@@ -25,14 +25,19 @@ public class TemporalGranularityAnalyzer {
     // ===== TEMPORAL FUNCTION CONSTANTS =====
     private static final String DATE_TRUNC = "date_trunc";
     private static final String FROM_UNIXTIME = "from_unixtime";
+    private static final String FROM_MILLISECONDS = "from_milliseconds";
+    private static final String FROM_UNIXTIME_NANOS = "from_unixtime_nanos";
     private static final String DATE_FORMAT = "date_format";
     private static final String DATE_ADD = "date_add";
     private static final String EXTRACT = "extract";
     private static final String TO_UNIXTIME = "to_unixtime";
+    private static final String TO_MILLISECONDS = "to_milliseconds";
+    private static final String TO_UNIXTIME_NANOS = "to_unixtime_nanos";
     
     // ===== TEMPORAL FUNCTION SETS =====
     private static final Set<String> TEMPORAL_FUNCTIONS = Set.of(
-        DATE_TRUNC, FROM_UNIXTIME, DATE_FORMAT, DATE_ADD, EXTRACT
+        DATE_TRUNC, FROM_UNIXTIME, FROM_MILLISECONDS, FROM_UNIXTIME_NANOS, 
+        DATE_FORMAT, DATE_ADD
     );
     
     /**
@@ -299,6 +304,63 @@ public class TemporalGranularityAnalyzer {
         }
     }
     
+    /**
+     * Represents Unix timestamp function pairs and their scaling factors.
+     * Used for context-aware parsing of Unix timestamp patterns.
+     */
+    private enum UnixTimeScale {
+        SECONDS(FROM_UNIXTIME, TO_UNIXTIME, 1L, "seconds"),
+        MILLISECONDS(FROM_MILLISECONDS, TO_MILLISECONDS, 1_000L, "milliseconds"),
+        NANOSECONDS(FROM_UNIXTIME_NANOS, TO_UNIXTIME_NANOS, 1_000_000_000L, "nanoseconds");
+        
+        private final String fromFunction;
+        private final String toFunction;
+        private final long scalingFactorToSeconds;
+        private final String description;
+        
+        UnixTimeScale(String fromFunction, String toFunction, long scalingFactorToSeconds, String description) {
+            this.fromFunction = fromFunction;
+            this.toFunction = toFunction;
+            this.scalingFactorToSeconds = scalingFactorToSeconds;
+            this.description = description;
+        }
+        
+        public String getFromFunction() {
+            return fromFunction;
+        }
+        
+        public String getToFunction() {
+            return toFunction;
+        }
+        
+        public long getScalingFactorToSeconds() {
+            return scalingFactorToSeconds;
+        }
+        
+        public String getDescription() {
+            return description;
+        }
+        
+        /**
+         * Finds the scale based on the outer function name.
+         */
+        public static UnixTimeScale fromOuterFunction(String functionName) {
+            for (UnixTimeScale scale : values()) {
+                if (scale.getFromFunction().equals(functionName)) {
+                    return scale;
+                }
+            }
+            return null;
+        }
+        
+        /**
+         * Validates that the inner function is compatible with this scale.
+         */
+        public boolean isCompatibleInnerFunction(String functionName) {
+            return this.toFunction.equals(functionName);
+        }
+    }
+    
     // ===== TIMESTAMP PATTERN DEFINITIONS =====
     private static final List<TimestampPattern> TIMESTAMP_PATTERNS = List.of(
         // Date only patterns - highest precision is DAY
@@ -538,8 +600,9 @@ public class TemporalGranularityAnalyzer {
         }
         
         // Check for Unix timestamp patterns first (they have higher priority for custom granularities)
-        if (FROM_UNIXTIME.equals(functionName)) {
-            TimeGranularity unixPattern = detectUnixTimestampPattern(func);
+        UnixTimeScale scale = UnixTimeScale.fromOuterFunction(functionName);
+        if (scale != null) {
+            TimeGranularity unixPattern = detectUnixTimestampGranularity(func, scale);
             if (unixPattern != TimeGranularity.NONE && unixPattern != TimeGranularity.UNKNOWN) {
                 return unixPattern;
             }
@@ -553,8 +616,6 @@ public class TemporalGranularityAnalyzer {
                 return processDateFormatFunction(func);
             case DATE_ADD:
                 return processDateAddFunction(func);
-            case EXTRACT:
-                return processExtractFunction(func);
             default:
                 // For other temporal functions, recursively search their arguments
                 return searchNestedArguments(func);
@@ -614,33 +675,47 @@ public class TemporalGranularityAnalyzer {
     
     /**
      * Handles EXTRACT expressions by analyzing the field being extracted.
+     * This is the single, authoritative handler for all EXTRACT expressions (io.trino.sql.tree.Extract).
+     * 
+     * EXTRACT expressions in Trino are parsed as Extract AST nodes, not FunctionCall nodes,
+     * so this method handles all EXTRACT patterns in the system.
      * 
      * @param expr The EXTRACT expression to analyze
-     * @return The granularity based on the extracted field
+     * @return The finest granularity based on the extracted field and source expression
      * 
      * Examples:
      * - EXTRACT(HOUR FROM timestamp) → HOUR
-     * - EXTRACT(DAY FROM date_trunc('month', ts)) → DAY (from field) or MONTH (from source), returns DAY as finest
+     * - EXTRACT(DAY FROM date_trunc('month', ts)) → DAY (finest of DAY from field and MONTH from source)
+     * - EXTRACT(MINUTE FROM date_add('second', 30, ts)) → MINUTE (finest of MINUTE from field and SECOND from source)
      */
     private TimeGranularity handleExtractExpression(Extract expr) {
+        TimeGranularity fieldGranularity = TimeGranularity.NONE;
+        
+        // Extract granularity from the field being extracted
         Extract.Field field = expr.getField();
         if (field != null) {
             String unit = field.toString().toLowerCase();
-            TimeGranularity granularity = TimeGranularity.fromUnit(unit);
-            if (granularity != TimeGranularity.UNKNOWN) {
-                logger.debug("EXTRACT({}) expression requires {} granularity", unit, granularity);
-                return granularity;
+            fieldGranularity = TimeGranularity.fromUnit(unit);
+            if (fieldGranularity != TimeGranularity.UNKNOWN) {
+                logger.debug("EXTRACT({}) field requires {} granularity", unit, fieldGranularity);
+            } else {
+                logger.debug("Unrecognized EXTRACT field: '{}' - treating as UNKNOWN", unit);
+                fieldGranularity = TimeGranularity.UNKNOWN;
             }
+        } else {
+            logger.debug("EXTRACT expression has no field - cannot determine granularity");
         }
         
-        // Also check the expression being extracted from for nested temporal patterns
+        // Also check the source expression being extracted from for nested temporal patterns
         TimeGranularity sourceGranularity = extractGranularity(expr.getExpression());
         if (sourceGranularity != TimeGranularity.NONE && sourceGranularity != TimeGranularity.UNKNOWN) {
             logger.debug("Found nested temporal granularity {} in EXTRACT source expression", sourceGranularity);
-            return sourceGranularity;
         }
         
-        return TimeGranularity.NONE;
+        // Return the finest granularity between field and source
+        TimeGranularity finestGranularity = getFinestGranularity(fieldGranularity, sourceGranularity);
+        logger.debug("EXTRACT expression analysis: field={}, source={}, finest={}", fieldGranularity, sourceGranularity, finestGranularity);
+        return finestGranularity;
     }
     
     /**
@@ -900,33 +975,6 @@ public class TemporalGranularityAnalyzer {
         return granularity;
     }
     
-    /**
-     * Processes EXTRACT function calls to determine filtering granularity.
-     * 
-     * @param func The EXTRACT function call
-     * @return The granularity from the extracted field
-     * 
-     * Examples:
-     * - EXTRACT(HOUR FROM timestamp) → HOUR
-     */
-    private TimeGranularity processExtractFunction(FunctionCall func) {
-        List<Expression> args = func.getArguments();
-        if (args.size() < 2) {
-            return TimeGranularity.NONE;
-        }
-        
-        Expression unitExpr = args.get(0);
-        if (unitExpr instanceof Identifier) {
-            String unit = ((Identifier) unitExpr).getValue().toLowerCase();
-            TimeGranularity granularity = TimeGranularity.fromUnit(unit);
-            if (granularity != TimeGranularity.UNKNOWN) {
-                logger.debug("EXTRACT({}) function requires {} granularity for filtering", unit, granularity);
-                return granularity;
-            }
-        }
-        
-        return TimeGranularity.NONE;
-    }
     
     // ===== LITERAL AND STRING ANALYSIS =====
     
@@ -1287,17 +1335,20 @@ public class TemporalGranularityAnalyzer {
     // ===== UNIX TIMESTAMP PATTERN DETECTION =====
     
     /**
-     * Detects Unix timestamp patterns for custom granularities.
-     * Pattern: FROM_UNIXTIME(CAST(FLOOR(TO_UNIXTIME(timestamp) / divisor) AS BIGINT) * divisor)
-     * The divisor represents the granularity in seconds.
+     * Detects Unix timestamp patterns with context-aware scale analysis.
+     * Handles different scales (seconds, milliseconds, nanoseconds) and validates function pair compatibility.
      * 
-     * @param fromUnixtimeFunc The FROM_UNIXTIME function to analyze
-     * @return The granularity based on the divisor pattern
+     * Pattern: FROM_UNIXTIME(CAST(FLOOR(TO_UNIXTIME(timestamp) / divisor) AS BIGINT) * divisor)
+     * 
+     * @param fromFunction The outer FROM_* function to analyze
+     * @param scale The detected scale context
+     * @return The granularity based on the divisor pattern and scale
      */
-    private TimeGranularity detectUnixTimestampPattern(FunctionCall fromUnixtimeFunc) {
-        List<Expression> args = fromUnixtimeFunc.getArguments();
+    private TimeGranularity detectUnixTimestampGranularity(FunctionCall fromFunction, UnixTimeScale scale) {
+        List<Expression> args = fromFunction.getArguments();
         if (args.isEmpty()) {
-            return TimeGranularity.NONE; // Empty FROM_UNIXTIME has no temporal pattern
+            logger.debug("Empty {} function has no temporal pattern", scale.getFromFunction());
+            return TimeGranularity.NONE;
         }
         
         Expression firstArg = args.get(0);
@@ -1306,30 +1357,71 @@ public class TemporalGranularityAnalyzer {
         if (firstArg instanceof ArithmeticBinaryExpression) {
             ArithmeticBinaryExpression mult = (ArithmeticBinaryExpression) firstArg;
             if (mult.getOperator() == ArithmeticBinaryExpression.Operator.MULTIPLY) {
-                // Extract the divisor from the right operand
-                Long divisor = extractDivisorFromMultiplication(mult);
-                if (divisor != null) {
-                    logger.debug("Detected Unix timestamp pattern with {} second intervals", divisor);
-                    return TimeGranularity.fromSeconds(divisor);
+                // Extract the divisor and validate function pair compatibility
+                DivisorExtractionResult result = extractDivisorWithScale(mult, scale);
+                if (result.isValid()) {
+                    long normalizedSeconds = result.getDivisor() / scale.getScalingFactorToSeconds();
+                    logger.debug("Detected {} timestamp pattern: divisor={}, scale={}, normalized_seconds={}", 
+                               scale.getDescription(), result.getDivisor(), scale.getScalingFactorToSeconds(), normalizedSeconds);
+                    return TimeGranularity.fromSeconds(normalizedSeconds);
+                } else if (result.hasIncompatibleFunctions()) {
+                    logger.warn("Found incompatible function pair in Unix timestamp pattern: outer={}, inner={}", 
+                              scale.getFromFunction(), result.getFoundInnerFunction());
+                    return TimeGranularity.UNKNOWN;
                 }
-                // If we found multiplication but couldn't extract divisor, it might be a complex pattern
-                logger.debug("Found multiplication in FROM_UNIXTIME but couldn't parse divisor - returning UNKNOWN");
+                // If we found multiplication but couldn't extract valid divisor, it might be a complex pattern
+                logger.debug("Found multiplication in {} but couldn't parse valid divisor - returning UNKNOWN", scale.getFromFunction());
                 return TimeGranularity.UNKNOWN;
             }
         }
         
-        // FROM_UNIXTIME with non-multiplication argument is likely not a temporal grouping pattern
+        // Function with non-multiplication argument is likely not a temporal grouping pattern
         return TimeGranularity.NONE;
     }
     
     /**
-     * Extracts the divisor from a multiplication expression in Unix timestamp patterns.
-     * Looks for: CAST(FLOOR(TO_UNIXTIME(...) / divisor) AS BIGINT) * divisor
+     * Represents the result of divisor extraction with scale validation.
+     */
+    private static class DivisorExtractionResult {
+        private final Long divisor;
+        private final boolean valid;
+        private final String foundInnerFunction;
+        private final boolean incompatibleFunctions;
+        
+        public DivisorExtractionResult(Long divisor, boolean valid, String foundInnerFunction, boolean incompatibleFunctions) {
+            this.divisor = divisor;
+            this.valid = valid;
+            this.foundInnerFunction = foundInnerFunction;
+            this.incompatibleFunctions = incompatibleFunctions;
+        }
+        
+        public static DivisorExtractionResult valid(long divisor) {
+            return new DivisorExtractionResult(divisor, true, null, false);
+        }
+        
+        public static DivisorExtractionResult invalid() {
+            return new DivisorExtractionResult(null, false, null, false);
+        }
+        
+        public static DivisorExtractionResult incompatible(String foundInnerFunction) {
+            return new DivisorExtractionResult(null, false, foundInnerFunction, true);
+        }
+        
+        public boolean isValid() { return valid; }
+        public Long getDivisor() { return divisor; }
+        public String getFoundInnerFunction() { return foundInnerFunction; }
+        public boolean hasIncompatibleFunctions() { return incompatibleFunctions; }
+    }
+    
+    /**
+     * Extracts the divisor from a multiplication expression with scale-aware validation.
+     * Validates that the inner TO_* function is compatible with the outer FROM_* function scale.
      * 
      * @param mult The multiplication expression to analyze
-     * @return The divisor value if found, null otherwise
+     * @param scale The expected scale context
+     * @return The extraction result with divisor and validation status
      */
-    private Long extractDivisorFromMultiplication(ArithmeticBinaryExpression mult) {
+    private DivisorExtractionResult extractDivisorWithScale(ArithmeticBinaryExpression mult, UnixTimeScale scale) {
         Expression rightOperand = mult.getRight();
         
         // The right operand should be the divisor (numeric literal)
@@ -1337,24 +1429,58 @@ public class TemporalGranularityAnalyzer {
             long divisor = Long.parseLong(((LongLiteral) rightOperand).getValue());
             
             // Verify the pattern by checking if the left operand contains the same divisor in a division
-            Expression leftOperand = mult.getLeft();
-            if (containsDivisionByValue(leftOperand, divisor)) {
-                return divisor;
+            // AND validate that the inner function is compatible with our scale
+            DivisionValidationResult divisionResult = validateDivisionWithScale(mult.getLeft(), divisor, scale);
+            if (divisionResult.isValid()) {
+                return DivisorExtractionResult.valid(divisor);
+            } else if (divisionResult.hasIncompatibleFunction()) {
+                return DivisorExtractionResult.incompatible(divisionResult.getFoundFunction());
             }
         }
         
-        return null;
+        return DivisorExtractionResult.invalid();
     }
     
     /**
-     * Recursively checks if an expression contains division by a specific value.
-     * Used to verify Unix timestamp patterns: TO_UNIXTIME(...) / divisor
+     * Represents the result of division validation with function compatibility.
+     */
+    private static class DivisionValidationResult {
+        private final boolean valid;
+        private final String foundFunction;
+        private final boolean incompatibleFunction;
+        
+        public DivisionValidationResult(boolean valid, String foundFunction, boolean incompatibleFunction) {
+            this.valid = valid;
+            this.foundFunction = foundFunction;
+            this.incompatibleFunction = incompatibleFunction;
+        }
+        
+        public static DivisionValidationResult valid() {
+            return new DivisionValidationResult(true, null, false);
+        }
+        
+        public static DivisionValidationResult invalid() {
+            return new DivisionValidationResult(false, null, false);
+        }
+        
+        public static DivisionValidationResult incompatible(String foundFunction) {
+            return new DivisionValidationResult(false, foundFunction, true);
+        }
+        
+        public boolean isValid() { return valid; }
+        public String getFoundFunction() { return foundFunction; }
+        public boolean hasIncompatibleFunction() { return incompatibleFunction; }
+    }
+    
+    /**
+     * Recursively validates division patterns and function compatibility.
      * 
      * @param expr The expression to search
      * @param expectedDivisor The divisor value to look for
-     * @return true if the expression contains division by the expected divisor
+     * @param scale The expected scale context
+     * @return The validation result with compatibility information
      */
-    private boolean containsDivisionByValue(Expression expr, long expectedDivisor) {
+    private DivisionValidationResult validateDivisionWithScale(Expression expr, long expectedDivisor, UnixTimeScale scale) {
         if (expr instanceof ArithmeticBinaryExpression) {
             ArithmeticBinaryExpression arith = (ArithmeticBinaryExpression) expr;
             
@@ -1363,64 +1489,118 @@ public class TemporalGranularityAnalyzer {
                 if (rightOperand instanceof LongLiteral) {
                     long divisor = Long.parseLong(((LongLiteral) rightOperand).getValue());
                     if (divisor == expectedDivisor) {
-                        // Also check if the left operand contains TO_UNIXTIME
-                        return containsToUnixtimeFunction(arith.getLeft());
+                        // Check if the left operand contains compatible TO_* function
+                        FunctionCompatibilityResult compatResult = findAndValidateToFunction(arith.getLeft(), scale);
+                        if (compatResult.isCompatible()) {
+                            return DivisionValidationResult.valid();
+                        } else if (compatResult.hasIncompatibleFunction()) {
+                            return DivisionValidationResult.incompatible(compatResult.getFoundFunction());
+                        }
                     }
                 }
             }
             
             // Recursively check both operands
-            return containsDivisionByValue(arith.getLeft(), expectedDivisor) ||
-                   containsDivisionByValue(arith.getRight(), expectedDivisor);
+            DivisionValidationResult leftResult = validateDivisionWithScale(arith.getLeft(), expectedDivisor, scale);
+            if (leftResult.isValid() || leftResult.hasIncompatibleFunction()) {
+                return leftResult;
+            }
+            
+            return validateDivisionWithScale(arith.getRight(), expectedDivisor, scale);
         } else if (expr instanceof FunctionCall) {
             FunctionCall func = (FunctionCall) expr;
             
             // Check function arguments
             for (Expression arg : func.getArguments()) {
-                if (containsDivisionByValue(arg, expectedDivisor)) {
-                    return true;
+                DivisionValidationResult result = validateDivisionWithScale(arg, expectedDivisor, scale);
+                if (result.isValid() || result.hasIncompatibleFunction()) {
+                    return result;
                 }
             }
         } else if (expr instanceof Cast) {
             Cast cast = (Cast) expr;
-            return containsDivisionByValue(cast.getExpression(), expectedDivisor);
+            return validateDivisionWithScale(cast.getExpression(), expectedDivisor, scale);
         }
         
-        return false;
+        return DivisionValidationResult.invalid();
     }
     
     /**
-     * Checks if an expression contains a TO_UNIXTIME function call.
+     * Represents the result of function compatibility validation.
+     */
+    private static class FunctionCompatibilityResult {
+        private final boolean compatible;
+        private final String foundFunction;
+        private final boolean hasIncompatibleFunction;
+        
+        public FunctionCompatibilityResult(boolean compatible, String foundFunction, boolean hasIncompatibleFunction) {
+            this.compatible = compatible;
+            this.foundFunction = foundFunction;
+            this.hasIncompatibleFunction = hasIncompatibleFunction;
+        }
+        
+        public static FunctionCompatibilityResult compatible() {
+            return new FunctionCompatibilityResult(true, null, false);
+        }
+        
+        public static FunctionCompatibilityResult notFound() {
+            return new FunctionCompatibilityResult(false, null, false);
+        }
+        
+        public static FunctionCompatibilityResult incompatible(String foundFunction) {
+            return new FunctionCompatibilityResult(false, foundFunction, true);
+        }
+        
+        public boolean isCompatible() { return compatible; }
+        public String getFoundFunction() { return foundFunction; }
+        public boolean hasIncompatibleFunction() { return hasIncompatibleFunction; }
+    }
+    
+    /**
+     * Recursively searches for TO_* functions and validates compatibility with the expected scale.
      * 
      * @param expr The expression to search
-     * @return true if TO_UNIXTIME function is found
+     * @param scale The expected scale context
+     * @return The compatibility result
      */
-    private boolean containsToUnixtimeFunction(Expression expr) {
+    private FunctionCompatibilityResult findAndValidateToFunction(Expression expr, UnixTimeScale scale) {
         if (expr instanceof FunctionCall) {
             FunctionCall func = (FunctionCall) expr;
             String funcName = func.getName().toString().toLowerCase();
             
-            if (TO_UNIXTIME.equals(funcName)) {
-                logger.debug("Found TO_UNIXTIME function in Unix timestamp pattern");
-                return true;
+            // Check if this is a TO_* function
+            if (funcName.equals(TO_UNIXTIME) || funcName.equals(TO_MILLISECONDS) || funcName.equals(TO_UNIXTIME_NANOS)) {
+                if (scale.isCompatibleInnerFunction(funcName)) {
+                    logger.debug("Found compatible function pair: {} with {}", scale.getFromFunction(), funcName);
+                    return FunctionCompatibilityResult.compatible();
+                } else {
+                    logger.debug("Found incompatible function pair: {} with {}", scale.getFromFunction(), funcName);
+                    return FunctionCompatibilityResult.incompatible(funcName);
+                }
             }
             
             // Recursively check function arguments
             for (Expression arg : func.getArguments()) {
-                if (containsToUnixtimeFunction(arg)) {
-                    return true;
+                FunctionCompatibilityResult result = findAndValidateToFunction(arg, scale);
+                if (result.isCompatible() || result.hasIncompatibleFunction()) {
+                    return result;
                 }
             }
         } else if (expr instanceof ArithmeticBinaryExpression) {
             ArithmeticBinaryExpression arith = (ArithmeticBinaryExpression) expr;
-            return containsToUnixtimeFunction(arith.getLeft()) || 
-                   containsToUnixtimeFunction(arith.getRight());
+            
+            FunctionCompatibilityResult leftResult = findAndValidateToFunction(arith.getLeft(), scale);
+            if (leftResult.isCompatible() || leftResult.hasIncompatibleFunction()) {
+                return leftResult;
+            }
+            
+            return findAndValidateToFunction(arith.getRight(), scale);
         } else if (expr instanceof Cast) {
             Cast cast = (Cast) expr;
-            return containsToUnixtimeFunction(cast.getExpression());
+            return findAndValidateToFunction(cast.getExpression(), scale);
         }
         
-        return false;
+        return FunctionCompatibilityResult.notFound();
     }
     
     // ===== UTILITY METHODS =====
