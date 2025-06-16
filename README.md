@@ -218,8 +218,6 @@ mvn test -Dlogback.configurationFile=src/test/resources/logback.xml
 4. Run tests to validate
 
 ## 📚 Documentation
-
-- **[CLAUDE.md](./CLAUDE.md)** - Comprehensive development guide and feature status
 - **[Architecture Documentation](https://netskope.atlassian.net/wiki/spaces/DEAA/pages/5596484003/TrinoSQL+Rewriter+design)** - Detailed system design
 - **[Trino Documentation](https://trino.io/docs/current/)** - SQL parser and function reference
 
