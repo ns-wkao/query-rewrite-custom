@@ -4,6 +4,7 @@ import io.trino.sql.tree.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -34,11 +35,46 @@ public class TemporalGranularityAnalyzer {
     private static final String TO_MILLISECONDS = "to_milliseconds";
     private static final String TO_UNIXTIME_NANOS = "to_unixtime_nanos";
     
+    // Standard Trino temporal extraction functions
+    private static final String YEAR = "year";
+    private static final String YEAR_OF_WEEK = "year_of_week";
+    private static final String YOW = "yow";
+    private static final String QUARTER = "quarter";
+    private static final String MONTH = "month";
+    private static final String WEEK = "week";
+    private static final String WEEK_OF_YEAR = "week_of_year";
+    private static final String DAY = "day";
+    private static final String DAY_OF_MONTH = "day_of_month";
+    private static final String DAY_OF_WEEK = "day_of_week";
+    private static final String DOW = "dow";
+    private static final String DAY_OF_YEAR = "day_of_year";
+    private static final String DOY = "doy";
+    private static final String HOUR = "hour";
+    private static final String TIMEZONE_HOUR = "timezone_hour";
+    private static final String MINUTE = "minute";
+    private static final String TIMEZONE_MINUTE = "timezone_minute";
+    private static final String SECOND = "second";
+    private static final String MILLISECOND = "millisecond";
+    
     // ===== TEMPORAL FUNCTION SETS =====
-    private static final Set<String> TEMPORAL_FUNCTIONS = Set.of(
+    private static final Set<String> COMPLEX_TEMPORAL_FUNCTIONS = Set.of(
         DATE_TRUNC, FROM_UNIXTIME, FROM_MILLISECONDS, FROM_UNIXTIME_NANOS, 
         DATE_FORMAT, DATE_ADD
     );
+    
+    private static final Set<String> STANDARD_TEMPORAL_FUNCTIONS = Set.of(
+        YEAR, YEAR_OF_WEEK, YOW, QUARTER, MONTH, WEEK, WEEK_OF_YEAR,
+        DAY, DAY_OF_MONTH, DAY_OF_WEEK, DOW, DAY_OF_YEAR, DOY,
+        HOUR, TIMEZONE_HOUR, MINUTE, TIMEZONE_MINUTE, SECOND, MILLISECOND
+    );
+    
+    // Combined set of all temporal functions
+    private static final Set<String> TEMPORAL_FUNCTIONS;
+    static {
+        Set<String> combined = new HashSet<>(COMPLEX_TEMPORAL_FUNCTIONS);
+        combined.addAll(STANDARD_TEMPORAL_FUNCTIONS);
+        TEMPORAL_FUNCTIONS = Set.copyOf(combined);
+    }
     
     /**
      * Represents temporal granularity with flexible support for custom intervals.
@@ -579,6 +615,11 @@ public class TemporalGranularityAnalyzer {
             return handleExtractExpression((Extract) expr);
         }
         
+        if (expr instanceof InPredicate) {
+            logger.debug("Processing as InPredicate");
+            return handleInPredicate((InPredicate) expr);
+        }
+        
         //logger.debug("Expression type '{}' not recognized for temporal analysis - no temporal granularity found", expr.getClass().getSimpleName());
         return TimeGranularity.NONE;
     }
@@ -587,39 +628,54 @@ public class TemporalGranularityAnalyzer {
     
     /**
      * Handles FunctionCall expressions by identifying temporal functions and processing them.
+     * Routes to appropriate processors based on function type (standard vs complex).
      * 
      * @param func The function call to analyze
      * @return The temporal granularity from the function or its arguments
      */
     private TimeGranularity handleFunctionCall(FunctionCall func) {
         String functionName = func.getName().toString().toLowerCase(Locale.ROOT);
-        
+        logger.debug("Temporal function found as {}", functionName);
+
         // Early exit for non-temporal functions
         if (!TEMPORAL_FUNCTIONS.contains(functionName)) {
+            logger.debug("No corresponding temporal function found, searching nested arguements...");
             return searchNestedArguments(func);
         }
         
-        // Check for Unix timestamp patterns first (they have higher priority for custom granularities)
-        UnixTimeScale scale = UnixTimeScale.fromOuterFunction(functionName);
-        if (scale != null) {
-            TimeGranularity unixPattern = detectUnixTimestampGranularity(func, scale);
-            if (unixPattern != TimeGranularity.NONE && unixPattern != TimeGranularity.UNKNOWN) {
-                return unixPattern;
+        // Check if this is a standard temporal function with fixed granularity
+        if (STANDARD_TEMPORAL_FUNCTIONS.contains(functionName)) {
+            return processStandardTemporalFunction(functionName);
+        }
+        
+        // Handle complex temporal functions that require parameter analysis
+        if (COMPLEX_TEMPORAL_FUNCTIONS.contains(functionName)) {
+            // Check for Unix timestamp patterns first (they have higher priority for custom granularities)
+            UnixTimeScale scale = UnixTimeScale.fromOuterFunction(functionName);
+            if (scale != null) {
+                TimeGranularity unixPattern = detectUnixTimestampGranularity(func, scale);
+                if (unixPattern != TimeGranularity.NONE && unixPattern != TimeGranularity.UNKNOWN) {
+                    return unixPattern;
+                }
+            }
+            
+            // Handle specific complex temporal functions
+            switch (functionName) {
+                case DATE_TRUNC:
+                    return processDateTruncFunction(func);
+                case DATE_FORMAT:
+                    return processDateFormatFunction(func);
+                case DATE_ADD:
+                    return processDateAddFunction(func);
+                default:
+                    // For other complex temporal functions, recursively search their arguments
+                    return searchNestedArguments(func);
             }
         }
         
-        // Handle specific temporal functions
-        switch (functionName) {
-            case DATE_TRUNC:
-                return processDateTruncFunction(func);
-            case DATE_FORMAT:
-                return processDateFormatFunction(func);
-            case DATE_ADD:
-                return processDateAddFunction(func);
-            default:
-                // For other temporal functions, recursively search their arguments
-                return searchNestedArguments(func);
-        }
+        // This should not happen if our sets are properly maintained
+        logger.warn("Temporal function '{}' found in TEMPORAL_FUNCTIONS but not in specific category sets", functionName);
+        return searchNestedArguments(func);
     }
     
     /**
@@ -887,6 +943,37 @@ public class TemporalGranularityAnalyzer {
         return TimeGranularity.NONE;
     }
     
+    /**
+     * Handles IN predicate expressions by analyzing the value and value list.
+     * 
+     * @param expr The IN predicate expression to analyze
+     * @return The granularity from the value expression or value list
+     * 
+     * Examples:
+     * - MONTH(timestamp) IN (1, 4, 7, 10) → MONTH
+     * - date_trunc('day', ts) IN (date1, date2) → DAY
+     */
+    private TimeGranularity handleInPredicate(InPredicate expr) {
+        logger.debug("Analyzing IN predicate expression");
+        
+        // Check the value expression (left side of IN) for temporal patterns
+        TimeGranularity valueGranularity = extractGranularity(expr.getValue());
+        if (valueGranularity != TimeGranularity.NONE && valueGranularity != TimeGranularity.UNKNOWN) {
+            logger.debug("Found temporal granularity {} in IN predicate value expression", valueGranularity);
+            return valueGranularity;
+        }
+        
+        // Check the value list (right side of IN) for temporal patterns
+        TimeGranularity listGranularity = extractGranularity(expr.getValueList());
+        if (listGranularity != TimeGranularity.NONE && listGranularity != TimeGranularity.UNKNOWN) {
+            logger.debug("Found temporal granularity {} in IN predicate value list", listGranularity);
+            return listGranularity;
+        }
+        
+        logger.debug("No temporal granularity found in IN predicate expression");
+        return TimeGranularity.NONE;
+    }
+    
     // ===== SQL FUNCTION PROCESSORS =====
     
     /**
@@ -924,31 +1011,47 @@ public class TemporalGranularityAnalyzer {
     }
     
     /**
-     * Processes DATE_FORMAT function calls that often wrap DATE_TRUNC.
+     * Processes DATE_FORMAT function calls by analyzing both the source expression and format string.
+     * The effective granularity is constrained by the format string (acts as a ceiling).
      * 
      * @param func The DATE_FORMAT function call
-     * @return The granularity from the wrapped date expression
+     * @return The effective granularity considering both source and format constraints
      * 
      * Examples:
-     * - DATE_FORMAT(date_trunc('hour', timestamp), '%Y-%m-%d %H:00:00') → HOUR
+     * - DATE_FORMAT(date_trunc('hour', timestamp), '%Y-%m-%d') → DAY (format constrains to day)
+     * - DATE_FORMAT(timestamp, '%Y-%m-%d %H:%i') → MINUTE (format allows minute precision)
      */
     private TimeGranularity processDateFormatFunction(FunctionCall func) {
         List<Expression> arguments = func.getArguments();
         
-        if (arguments.isEmpty()) {
-            logger.debug("DATE_FORMAT function has no arguments");
+        if (arguments.size() < 2) {
+            logger.debug("DATE_FORMAT function has insufficient arguments: {}", arguments.size());
             return TimeGranularity.NONE;
         }
         
-        // Analyze the first argument (the date expression) for temporal granularity
+        // Analyze first argument (date expression) for source granularity
         Expression dateExpression = arguments.get(0);
-        TimeGranularity granularity = extractGranularity(dateExpression);
+        TimeGranularity sourceGranularity = extractGranularity(dateExpression);
         
-        if (granularity != TimeGranularity.NONE && granularity != TimeGranularity.UNKNOWN) {
-            logger.debug("Found temporal granularity {} within DATE_FORMAT function", granularity);
+        // Analyze second argument (format string) for output constraint
+        Expression formatExpression = arguments.get(1);
+        TimeGranularity formatGranularity = TimeGranularity.NONE;
+        
+        if (formatExpression instanceof StringLiteral) {
+            String formatString = ((StringLiteral) formatExpression).getValue();
+            formatGranularity = analyzeFormatStringGranularity(formatString);
+            logger.debug("Format string '{}' constrains output to {} granularity", formatString, formatGranularity);
+        } else {
+            logger.debug("DATE_FORMAT second argument is not a string literal: {}", formatExpression.getClass().getSimpleName());
         }
         
-        return granularity;
+        // The effective granularity is the coarser of the two (format string acts as ceiling)
+        TimeGranularity effectiveGranularity = getCoarserGranularity(sourceGranularity, formatGranularity);
+        
+        logger.debug("DATE_FORMAT effective granularity: source={}, format={}, effective={}", 
+                    sourceGranularity, formatGranularity, effectiveGranularity);
+        
+        return effectiveGranularity;
     }
     
     /**
@@ -975,8 +1078,162 @@ public class TemporalGranularityAnalyzer {
         return granularity;
     }
     
+    /**
+     * Processes standard Trino temporal extraction functions that have fixed granularities.
+     * These functions return a specific temporal component and have predictable granularities
+     * based on their function name alone, requiring no parameter analysis.
+     * 
+     * @param functionName The name of the standard temporal function (lowercase)
+     * @return The fixed granularity associated with the function
+     * 
+     * Examples:
+     * - day(timestamp) → DAY
+     * - hour(timestamp) → HOUR  
+     * - minute(timestamp) → MINUTE
+     * - day_of_month(timestamp) → DAY
+     */
+    private TimeGranularity processStandardTemporalFunction(String functionName) {
+        switch (functionName) {
+            // YEAR granularity functions
+            case YEAR:
+            case YEAR_OF_WEEK:
+            case YOW:
+                logger.debug("Standard temporal function '{}' has YEAR granularity", functionName);
+                return TimeGranularity.YEAR;
+            
+            // QUARTER granularity functions
+            case QUARTER:
+                logger.debug("Standard temporal function '{}' has QUARTER granularity", functionName);
+                return TimeGranularity.QUARTER;
+            
+            // MONTH granularity functions
+            case MONTH:
+                logger.debug("Standard temporal function '{}' has MONTH granularity", functionName);
+                return TimeGranularity.MONTH;
+            
+            // WEEK granularity functions
+            case WEEK:
+            case WEEK_OF_YEAR:
+                logger.debug("Standard temporal function '{}' has WEEK granularity", functionName);
+                return TimeGranularity.WEEK;
+            
+            // DAY granularity functions
+            case DAY:
+            case DAY_OF_MONTH:
+            case DAY_OF_WEEK:
+            case DOW:
+            case DAY_OF_YEAR:
+            case DOY:
+                logger.debug("Standard temporal function '{}' has DAY granularity", functionName);
+                return TimeGranularity.DAY;
+            
+            // HOUR granularity functions
+            case HOUR:
+            case TIMEZONE_HOUR:
+                logger.debug("Standard temporal function '{}' has HOUR granularity", functionName);
+                return TimeGranularity.HOUR;
+            
+            // MINUTE granularity functions
+            case MINUTE:
+            case TIMEZONE_MINUTE:
+                logger.debug("Standard temporal function '{}' has MINUTE granularity", functionName);
+                return TimeGranularity.MINUTE;
+            
+            // SECOND granularity functions
+            case SECOND:
+                logger.debug("Standard temporal function '{}' has SECOND granularity", functionName);
+                return TimeGranularity.SECOND;
+            
+            // MILLISECOND granularity functions
+            case MILLISECOND:
+                logger.debug("Standard temporal function '{}' has MILLISECOND granularity", functionName);
+                return TimeGranularity.MILLISECOND;
+            
+            default:
+                logger.debug("Unknown standard temporal function: '{}'", functionName);
+                return TimeGranularity.UNKNOWN;
+        }
+    }
+    
     
     // ===== LITERAL AND STRING ANALYSIS =====
+    
+    /**
+     * Analyzes DATE_FORMAT format strings to determine output granularity using regex patterns.
+     * Checks from finest to coarsest granularity to avoid misclassification.
+     * Based on official Trino DATE_FORMAT documentation.
+     * 
+     * @param formatString The format string to analyze
+     * @return The granularity constrained by the format string
+     */
+    private TimeGranularity analyzeFormatStringGranularity(String formatString) {
+        if (formatString == null || formatString.trim().isEmpty()) {
+            return TimeGranularity.UNKNOWN;
+        }
+        
+        String format = formatString.trim();
+        
+        // Check from finest to coarsest granularity to avoid mismatches
+        
+        // MILLISECOND: Contains fractional second specifiers (finest precision)
+        if (format.matches(".*%f.*")) {
+            logger.debug("Format '{}' contains fractional seconds - MILLISECOND granularity", format);
+            return TimeGranularity.MILLISECOND;
+        }
+        
+        // SECOND: Contains second specifiers
+        if (format.matches(".*%s.*") || format.matches(".*%S.*") || 
+            format.matches(".*%r.*") || format.matches(".*%T.*")) {
+            logger.debug("Format '{}' contains seconds - SECOND granularity", format);
+            return TimeGranularity.SECOND;
+        }
+        
+        // MINUTE: Contains minute specifiers
+        if (format.matches(".*%i.*")) {
+            logger.debug("Format '{}' contains minutes - MINUTE granularity", format);
+            return TimeGranularity.MINUTE;
+        }
+        
+        // HOUR: Contains hour specifiers
+        if (format.matches(".*%H.*") || format.matches(".*%h.*") || 
+            format.matches(".*%I.*") || format.matches(".*%k.*") || 
+            format.matches(".*%l.*") || format.matches(".*%p.*")) {
+            logger.debug("Format '{}' contains hours - HOUR granularity", format);
+            return TimeGranularity.HOUR;
+        }
+        
+        // DAY: Contains day specifiers (including weekday names which represent daily grouping)
+        if (format.matches(".*%a.*") || format.matches(".*%d.*") || 
+            format.matches(".*%e.*") || format.matches(".*%j.*") || 
+            format.matches(".*%W.*")) {
+            logger.debug("Format '{}' contains day components - DAY granularity", format);
+            return TimeGranularity.DAY;
+        }
+        
+        // WEEK: Contains week specifiers (only %v is supported)
+        if (format.matches(".*%v.*")) {
+            logger.debug("Format '{}' contains week components - WEEK granularity", format);
+            return TimeGranularity.WEEK;
+        }
+        
+        // MONTH: Contains month specifiers
+        if (format.matches(".*%b.*") || format.matches(".*%c.*") || 
+            format.matches(".*%M.*") || format.matches(".*%m.*")) {
+            logger.debug("Format '{}' contains month components - MONTH granularity", format);
+            return TimeGranularity.MONTH;
+        }
+        
+        // YEAR: Contains year specifiers
+        if (format.matches(".*%Y.*") || format.matches(".*%y.*") || 
+            format.matches(".*%x.*")) {
+            logger.debug("Format '{}' contains year components - YEAR granularity", format);
+            return TimeGranularity.YEAR;
+        }
+        
+        // If no temporal components found, return UNKNOWN
+        logger.debug("No temporal components found in format '{}' - UNKNOWN granularity", format);
+        return TimeGranularity.UNKNOWN;
+    }
     
     /**
      * Analyzes temporal literal expressions using direct AST analysis.
@@ -1670,5 +1927,37 @@ public class TemporalGranularityAnalyzer {
         }
         
         return finest;
+    }
+    
+    /**
+     * Returns the coarsest (least precise) granularity from the given options.
+     * This is used when format constraints limit precision - the format acts as a ceiling.
+     * NONE is treated as "no temporal constraint" and any actual granularity takes precedence.
+     * 
+     * @param granularities Variable number of granularities to compare
+     * @return The coarsest granularity found, or NONE if no temporal constraints found
+     */
+    private TimeGranularity getCoarserGranularity(TimeGranularity... granularities) {
+        TimeGranularity coarsest = TimeGranularity.NONE;
+        
+        for (TimeGranularity granularity : granularities) {
+            if (granularity == null || granularity.equals(TimeGranularity.UNKNOWN)) {
+                continue; // Skip null and UNKNOWN
+            }
+            
+            if (granularity.equals(TimeGranularity.NONE)) {
+                continue; // Skip NONE - it represents no temporal constraint
+            }
+            
+            // If we haven't found any temporal constraint yet, this becomes the coarsest
+            if (coarsest.equals(TimeGranularity.NONE)) {
+                coarsest = granularity;
+            } else if (granularity.isCoarserThan(coarsest)) {
+                // Replace with coarser granularity
+                coarsest = granularity;
+            }
+        }
+        
+        return coarsest;
     }
 }
