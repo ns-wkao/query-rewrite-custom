@@ -425,6 +425,20 @@ public class TemporalGranularityAnalyzer {
             "US hour boundary"
         ),
         
+        // ISO 8601 without seconds (YYYY-MM-DD HH:MM and YYYY-MM-DDTHH:MM)
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})[T ](?<hour>\\d{2}):(?<minute>\\d{2})$"),
+            TimeGranularity.MINUTE,
+            "ISO 8601 without seconds: YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM"
+        ),
+        
+        // US format without seconds (YYYY/MM/DD HH:MM)
+        new TimestampPattern(
+            Pattern.compile("^(?<year>\\d{4})/(?<month>\\d{2})/(?<day>\\d{2}) (?<hour>\\d{2}):(?<minute>\\d{2})$"),
+            TimeGranularity.MINUTE,
+            "US format without seconds: YYYY/MM/DD HH:MM"
+        ),
+        
         // ISO 8601 full timestamp with comprehensive support
         new TimestampPattern(
             Pattern.compile("^(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})[T ](?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})(?:\\.(?<millisecond>\\d{1,6}))?(?<timezone>[Z]|[+-]\\d{2}:?\\d{2}|\\s+[A-Z]{3,4})?$"),
@@ -437,6 +451,20 @@ public class TemporalGranularityAnalyzer {
             Pattern.compile("^(?<year>\\d{4})/(?<month>\\d{2})/(?<day>\\d{2}) (?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})(?:\\.(?<millisecond>\\d{1,6}))?$"),
             null, // Analyze groups
             "US timestamp with optional milliseconds"
+        ),
+        
+        // US date order with seconds (MM/DD/YYYY HH:MM:SS)
+        new TimestampPattern(
+            Pattern.compile("^(?<month>\\d{2})/(?<day>\\d{2})/(?<year>\\d{4}) (?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})(?:\\.(?<millisecond>\\d{1,6}))?$"),
+            null, // Analyze groups
+            "US date order with seconds: MM/DD/YYYY HH:MM:SS"
+        ),
+        
+        // US date order without seconds (MM/DD/YYYY HH:MM)
+        new TimestampPattern(
+            Pattern.compile("^(?<month>\\d{2})/(?<day>\\d{2})/(?<year>\\d{4}) (?<hour>\\d{2}):(?<minute>\\d{2})$"),
+            TimeGranularity.MINUTE,
+            "US date order without seconds: MM/DD/YYYY HH:MM"
         ),
         
         // European format (DD/MM/YYYY or DD-MM-YYYY)

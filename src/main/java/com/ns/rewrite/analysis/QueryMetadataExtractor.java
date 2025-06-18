@@ -424,12 +424,22 @@ public class QueryMetadataExtractor {
                     // Existing column extraction logic
                     Set<String> filterColumns = extractIdentifiersFromExpression(where, sourceTableContext);
                     
-                    // NEW: Extract temporal filter requirements
                     TimeGranularity filterGranularityRequirement = temporalAnalyzer.extractFilterGranularity(where);
-                    this.filterGranularity = filterGranularityRequirement;
-                    logger.debug("Extracted filter granularity requirement: {}", filterGranularityRequirement);
                     
-                    // NEW: Extract temporal filter columns if there are temporal requirements
+                    // Combine with existing filter granularity (select finest)
+                    if (filterGranularityRequirement != null && 
+                        filterGranularityRequirement != TimeGranularity.NONE && 
+                        filterGranularityRequirement != TimeGranularity.UNKNOWN) {
+                        
+                        if (this.filterGranularity == TimeGranularity.NONE) {
+                            this.filterGranularity = filterGranularityRequirement;
+                        } else if (filterGranularityRequirement.isFinnerThan(this.filterGranularity)) {
+                            this.filterGranularity = filterGranularityRequirement;
+                        }
+                    }
+                    logger.debug("Extracted filter granularity requirement: {}, combined result: {}", 
+                               filterGranularityRequirement, this.filterGranularity);
+                    
                     if (filterGranularityRequirement != TimeGranularity.NONE && filterGranularityRequirement != TimeGranularity.UNKNOWN) {
                         Set<String> temporalFilterCols = extractTemporalFilterColumns(where, sourceTableContext);
                         this.temporalFilterColumns.addAll(temporalFilterCols);
